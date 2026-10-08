@@ -71,6 +71,19 @@ DSH 基于 [Cordis](https://cordis.cloud) 插件架构，插件可以（详见 [
 - **声明可配置项**：导出 `config` Schema，配置写在 patch / 配置层
 - **挂接事件**：`tools/pre-execute`、`tools/post-execute` 等流水线事件
 
+## 常见问题
+
+### 安装时报 `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`
+
+这不是插件本身的问题。DSH 的 pnpm 默认启用 24 小时「最小发布年龄」供应链策略：profile lockfile 里任何一个包是 24 小时内发布的，整次安装都会被拒绝（哪怕那个包与你要装的插件毫无关系）。
+
+典型场景：插件市场刚自动更新了某个插件（如 `dsh-context`），它的新版本还没满 24 小时。
+
+排查与修复：打开 profile 目录的 `pnpm-workspace.yaml`（桌面版通常在 `C:\Users\<你>\.dsh\profiles\desktop\`），检查 `minimumReleaseAgeExclude` 列表：
+
+- **同一个包只认列表中的第一条**。如果某包先有一行 `pkg@1.0 || 1.1`，后面又单独追加一行 `pkg@1.2`，第二行会被 pnpm 静默忽略。正确做法是把新版本串进第一条：`pkg@1.0 || 1.1 || 1.2`。
+- 改好后重试安装即可；或者等该版本发布满 24 小时，不改任何东西也能装。
+
 ## 参考资料
 
 - [pnpm 从 Git 子目录安装的语法](https://pnpm.io/package-sources#install-from-a-subdirectory-of-a-git-repository)
