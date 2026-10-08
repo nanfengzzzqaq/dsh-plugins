@@ -1,0 +1,6 @@
+# 向当前 profile 插入本插件的 Loader 条目。
+# id：profile 内唯一标识；name：包名（模块说明符），必须与 package.json 的 name 一致。
+# 可选 config 块可覆盖 lib/index.js 中 config Schema 的默认值。
+- insert:
+    - id: hello-tool
+      name: dsh-plugin-hello-tool

@@ -1,0 +1,10 @@
+{
+  "name": "dsh-plugins",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DeepSeek Harness (DSH) 插件合集与开发模板",
+  "license": "MIT",
+  "scripts": {
+    "list": "node -e \"const g=require('node:fs').readdirSync('plugins',{withFileTypes:true}).filter(d=>d.isDirectory()).map(d=>{try{return require('./plugins/'+d.name+'/package.json')}catch{return null}}).filter(Boolean);console.table(g.map(p=>({name:p.name,version:p.version,description:p.description})))\""
+  }
+}
