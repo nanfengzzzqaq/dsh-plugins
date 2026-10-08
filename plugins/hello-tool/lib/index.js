@@ -10,7 +10,9 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { Schema } from '@deepseek-ai/schemastery'
+// 注意：@deepseek-ai/schemastery 的 ESM 入口只有 default 导出（Schema 类本身），
+// 这里必须用 default import，不能用 `import { Schema }`（ESM 命名导入会失败）。
+import Schema from '@deepseek-ai/schemastery'
 
 /** Cordis 插件名，用于 Loader 诊断信息。 */
 export const name = 'hello-tool'
