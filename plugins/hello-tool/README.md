@@ -7,7 +7,7 @@ DSH 示例插件：注册一个最小的自定义工具 `hello_tool`，验证插
 在 DSH 的 **Plugins（插件）** 页面粘贴以下 spec 安装：
 
 ```
-nanfengzzzqaq/dsh-plugins#path:/plugins/hello-tool
+https://github.com/nanfengzzzqaq/dsh-plugins#path:/plugins/hello-tool
 ```
 
 本地开发可直接用绝对路径安装本目录。

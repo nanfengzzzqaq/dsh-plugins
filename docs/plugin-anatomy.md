@@ -137,11 +137,15 @@ DSH 插件管理器底层用 pnpm，支持（摘自 [pnpm 文档](https://pnpm.i
 
 | spec | 含义 |
 |---|---|
-| `user/repo` | GitHub 仓库默认分支 |
-| `user/repo#main` | 指定分支 |
-| `user/repo#v1.2.0` | 指定标签 |
-| `user/repo#path:/plugins/foo` | **monorepo 子目录**（本仓库使用的方式） |
+| `https://github.com/user/repo` | GitHub 仓库默认分支 |
+| `https://github.com/user/repo#main` | 指定分支 |
+| `https://github.com/user/repo#v1.2.0` | 指定标签 |
+| `https://github.com/user/repo#path:/plugins/foo` | **monorepo 子目录**（本仓库使用的方式） |
 | `D:\path\to\plugin` | 本地绝对路径（开发用） |
+
+> **注意**：DSH 安装框只把「完整 URL」识别为 Git 地址；pnpm 支持的 `user/repo` 简写
+> 会被当成 npm 包名去 registry 查询并报 `not a package name the registry accepts`，
+> 所以在安装框里请始终粘贴 `https://github.com/...` 完整地址。
 
 ## 版本兼容与豁免
 

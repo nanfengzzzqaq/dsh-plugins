@@ -31,7 +31,7 @@ dsh-plugins/
 2. 点击安装，粘贴下面表格里的安装 spec，例如：
 
 ```
-nanfengzzzqaq/dsh-plugins#path:/plugins/hello-tool
+https://github.com/nanfengzzzqaq/dsh-plugins#path:/plugins/hello-tool
 ```
 
 3. 确认信息无误后安装并启用。安装完成后新工具即可被 Agent 使用。
@@ -52,7 +52,7 @@ DSH 的插件管理器会读取该目录的 `package.json` 完成识别。配合
 
 | 插件 | 说明 | 安装 spec |
 |---|---|---|
-| [hello-tool](plugins/hello-tool/) | 示例插件：注册一个最小的自定义工具 `hello_tool`，用于验证插件链路和作为开发模板 | `nanfengzzzqaq/dsh-plugins#path:/plugins/hello-tool` |
+| [hello-tool](plugins/hello-tool/) | 示例插件：注册一个最小的自定义工具 `hello_tool`，用于验证插件链路和作为开发模板 | `https://github.com/nanfengzzzqaq/dsh-plugins#path:/plugins/hello-tool` |
 
 ## 如何新建一个插件
 
