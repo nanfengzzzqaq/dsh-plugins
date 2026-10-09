@@ -53,6 +53,7 @@ DSH 的插件管理器会读取该目录的 `package.json` 完成识别。配合
 | 插件 | 说明 | 安装 spec |
 |---|---|---|
 | [hello-tool](plugins/hello-tool/) | 示例插件：注册一个最小的自定义工具 `hello_tool`，用于验证插件链路和作为开发模板 | `https://github.com/nanfengzzzqaq/dsh-plugins#path:/plugins/hello-tool` |
+| [server-panel](plugins/server-panel/) | 服务器 / NAS 可视化管理面板：主机状态、Docker 容器管理（启停/日志）、远程文件浏览、重启/关机/WOL | `https://github.com/nanfengzzzqaq/dsh-plugins#path:/plugins/server-panel` |
 
 ## 如何新建一个插件
 

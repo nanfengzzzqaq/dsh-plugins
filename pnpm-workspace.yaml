@@ -1,2 +1,11 @@
 packages:
   - 'plugins/*'
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': false
+  '@google/genai': false
+  cpu-features: false
+  esbuild: true
+  koffi: false
+  node-pty: false
+  protobufjs: false
+  ssh2: false

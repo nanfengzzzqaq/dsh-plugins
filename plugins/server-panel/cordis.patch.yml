@@ -1,0 +1,7 @@
+# server-panel bundle patch：向当前 profile 插入本插件。
+# name 必须与 package.json 的 name 一致（模块说明符）。
+# Host 半区（exports "."）跑在宿主进程；package.json 的 dsh.client 声明
+# 让浏览器半区（exports "./client"）以 /plugins/<id>/client.js 加载进 Web GUI。
+- insert:
+    - id: server-panel
+      name: dsh-server-panel
