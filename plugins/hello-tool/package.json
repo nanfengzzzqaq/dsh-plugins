@@ -1,9 +1,10 @@
 {
   "name": "dsh-plugin-hello-tool",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH 示例插件：注册一个最小的自定义工具 hello_tool，可作为新插件的开发模板",
   "type": "module",
   "main": "lib/index.js",
+  "icon": "./icon.svg",
   "license": "MIT",
   "dsh": {
     "bundle": {

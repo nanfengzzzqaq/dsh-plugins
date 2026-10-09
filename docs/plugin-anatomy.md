@@ -66,7 +66,9 @@ my-plugin/
 
 ```js
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { Schema } from '@deepseek-ai/schemastery'
+// schemastery 的 ESM 入口只有 default 导出（Schema 类本身），
+// 必须 default import；`import { Schema }` 命名导入会直接加载失败。
+import Schema from '@deepseek-ai/schemastery'
 
 /** Cordis 插件名，用于 Loader 诊断。 */
 export const name = 'hello-tool'
@@ -74,19 +76,19 @@ export const name = 'hello-tool'
 /** 声明依赖的宿主服务，服务就绪后才会加载本插件。 */
 export const inject = ['tools']
 
-/** 可配置项（cordis.patch.yml / 配置层可覆盖）。 */
-export const config = Schema.object({
+/** 可配置项（cordis.patch.yml / 配置层可覆盖）。必须是大写 `Config` 导出。 */
+export const Config = Schema.object({
   greeting: Schema.string().default('你好').description('问候语'),
 })
 
-/** 插件主体。 */
-export function apply(ctx) {
+/** 插件主体：配置经 Config 校验后作为第二个参数传入。 */
+export function apply(ctx, config) {
   ctx.tools.register(
     defineTool({
       name: 'hello_tool',                     // 模型可见的工具名（snake_case）
       description: '工具描述，模型据此决定何时调用',
       parameters: {                           // 参数 schema DSL
-        who: { type: 'string', required: false, description: '要问候的对象' },
+        who: { type: 'string', description: '要问候的对象' },  // 可选参数：省略 required 即可
       },
       output: {
         schema: { type: 'string' },           // 输出的 JSON Schema
@@ -94,7 +96,7 @@ export function apply(ctx) {
       },
       async execute(args, exec) {
         // args 已经过验证；exec.signal 是协作式取消信号，长任务应响应它
-        return `${ctx.config.greeting}, ${args.who ?? 'DSH'}!`
+        return `${config.greeting}, ${args.who ?? 'DSH'}!`
       },
     }),
   )
@@ -108,8 +110,13 @@ export function apply(ctx) {
 |---|---|
 | `name` | Cordis 插件名，出现在 Loader 诊断信息里 |
 | `inject` | 依赖的宿主服务数组；全部就绪插件才会激活 |
-| `config` | Schema 配置声明，可被配置层覆盖 |
-| `apply(ctx)` | 插件主体，ctx 注销时插件自动清理 |
+| `Config` | Schema 配置声明（**大写**），可被配置层覆盖；小写 `config` 会被静默忽略 |
+| `apply(ctx, config)` | 插件主体，ctx 注销时插件自动清理；第二个参数是校验后的配置 |
+
+> **常见坑**：Cordis v4 没有 `ctx.config`。配置只能从 `apply` 的第二个参数拿
+> （在工具 `execute` 里通过闭包引用）。写 `ctx.config.xxx` 会在调用时抛
+> `cannot get property "config" without inject`。
+> 另外标记了 `.volatile()` 的配置字段会以响应式包装传入，取值要用 `config.x.get()`。
 
 ## 常见宿主服务（inject 可用值）
 
@@ -125,7 +132,8 @@ export function apply(ctx) {
 
 来自 `@deepseek-ai/dsh-tools`：
 
-- `parameters` 使用内建 schema DSL：`string` / `number` / `integer` / `boolean` / `null` / `array` / `object` / `json` / `oneOf`，每项可带 `required`、`description`
+- `parameters` 使用内建 schema DSL：`string` / `number` / `integer` / `boolean` / `null` / `array` / `object` / `json` / `oneOf`，每项可带 `description`
+- 必填与否用 `required: true` 标注；**可选参数省略 `required` 键即可，写 `required: false` 会在 `defineTool` 时直接抛 `JsonSchemaError`**（`required` 出现时必须为 true）
 - 模型参数在执行前自动验证，非法输入变成普通错误结果（不会中断回合）
 - `execute(args, exec)` 只能返回 `output.schema` 声明的 JSON 值
 - 注册的工具 schema 会**自动进入系统提示**，无需额外操作
@@ -161,6 +169,6 @@ DSH 插件管理器底层用 pnpm，支持（摘自 [pnpm 文档](https://pnpm.i
 
 官方插件还携带这些可选文件，有需要时可以参考添加：
 
-- `icon.svg` — 插件图标（插件页展示）
+- `icon.svg` — 插件图标（插件页展示）；需要在 package.json 顶层声明 `"icon": "./icon.svg"` 才会被读取
 - `locale/en.json`、`locale/zh.json` — i18n 文案
 - `README.i18n.yaml` — README 多语言元数据
