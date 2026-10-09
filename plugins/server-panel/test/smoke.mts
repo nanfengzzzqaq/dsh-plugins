@@ -99,21 +99,39 @@ const sshServer = new SshServer({ hostKeys: [hostKeyPem] }, (client) => {
         const channel = acceptExec()
         const command = info.command
         receivedCommands.push(command)
-        if (command.includes('reboot')) {
-          // Simulate the session dying with the host.
+        const exit = (code: number, out = '', err = ''): void => {
+          if (out) channel.write(out)
+          if (err) channel.stderr.write(err)
+          channel.exit(code)
           channel.end()
-          client.end()
+        }
+        if (command.includes('reboot') || command.includes('shutdown -h')) {
+          // sudo -S with the right password simulates a successful power
+          // action: the session dies with the host. Without it, refuse.
+          if (command.startsWith("echo 'secret' | sudo -S")) {
+            channel.end()
+            client.end()
+          } else {
+            exit(1, '', 'sudo: a password is required')
+          }
           return
         }
-        if (command.includes('__HOSTNAME__')) channel.write(STATUS_OUTPUT)
-        else if (command.includes('__SP_OK__')) channel.write('__SP_OK__\nLinux 4.4.302+\nDSM\n')
-        else if (command.includes('docker version')) channel.write('24.0.7\n')
-        else if (command.includes('docker stats')) channel.write(DOCKER_STATS)
-        else if (command.includes('docker ps')) channel.write(DOCKER_PS)
-        else if (command.includes('docker logs')) channel.write('log line 1\nlog line 2\n')
-        else if (command.includes('docker stop') || command.includes('docker start') || command.includes('docker restart')) channel.write(`${command.split(' ').pop()}\n`)
-        channel.exit(0)
-        channel.end()
+        // docker: only the sudo -S mode with the correct password works —
+        // plain / absolute-path / sudo -n all fail like on a default DSM.
+        if (command.includes('docker')) {
+          const authed = command.startsWith("echo 'secret' | sudo -S -p '' docker")
+          if (!authed) { exit(1, '', 'permission denied'); return }
+          if (command.includes('docker version')) exit(0, '24.0.7\n')
+          else if (command.includes('docker stats')) exit(0, DOCKER_STATS)
+          else if (command.includes('docker ps')) exit(0, DOCKER_PS)
+          else if (command.includes('docker logs')) exit(0, 'log line 1\nlog line 2\n')
+          else if (command.includes('docker stop') || command.includes('docker start') || command.includes('docker restart')) exit(0, `${command.split(' ').pop()}\n`)
+          else exit(0)
+          return
+        }
+        if (command.includes('__HOSTNAME__')) exit(0, STATUS_OUTPUT)
+        else if (command.includes('__SP_OK__')) exit(0, '__SP_OK__\nLinux 4.4.302+\nDSM\n')
+        else exit(0)
       })
     })
   })
@@ -207,6 +225,7 @@ async function jpost(path: string, body: unknown): Promise<{ status: number; bod
   const containers = (body as { containers: Array<Record<string, unknown>> }).containers
   check('docker list parsed', containers.length === 2 && containers[0].name === 'nginx', containers)
   check('docker stats merged', containers[0].cpuPercent === '0.50%', containers[0])
+  check('docker mode fell back to sudo -S with password', store.get('nas')?.dockerCommand === 'sudo -S docker', store.get('nas')?.dockerCommand)
   const { body: actionBody } = await jpost(API.dockerAction, { alias: 'nas', id: 'def456abc789', action: 'start' })
   check('docker start ok', (actionBody as { ok: boolean }).ok === true, actionBody)
   check('server received docker start', receivedCommands.some(c => c.includes('docker start')))

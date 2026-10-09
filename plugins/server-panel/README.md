@@ -36,8 +36,8 @@ https://github.com/nanfengzzzqaq/dsh-plugins#path:/plugins/server-panel
 ### 前置条件
 
 - 目标机器开启 SSH（群晖：控制面板 → 终端机和 SNMP → 启动 SSH）
-- Docker 管理需要 SSH 用户能跑 `docker` 或 `sudo -n docker`（免密 sudo）
-- 重启/关机需要免密 sudo（`sudo -n`）；没有配置时会报错提示
+- Docker 管理：插件会依次尝试 `docker` → `/usr/local/bin/docker`（DSM 路径）→ `sudo -n`（免密 sudo）→ **`sudo -S` 用已存的 SSH 密码提权**（群晖管理员账号默认可用，无需任何配置）。密码仅通过 SSH 加密通道送入远端 sudo 的标准输入
+- 重启/关机同样自动走 `sudo -S` 提权回退链
 - WOL 需要 DSH 所在机器与 NAS 在同一局域网
 
 ## 安全模型

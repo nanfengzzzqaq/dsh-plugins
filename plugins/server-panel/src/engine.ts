@@ -371,79 +371,124 @@ export class ServerEngine {
 
   // ------------------------------------------------------------- docker
 
-  /** Resolve the working docker CLI for a host, caching the answer. */
+  /**
+   * Docker CLI invocation modes, tried in order. `sudo -S` modes pipe the
+   * stored SSH password into sudo's stdin (echo is a shell builtin, so the
+   * password never appears in the remote process list). Only offered when
+   * the host uses password auth.
+   */
+  private dockerModes(entry: HostEntry): string[] {
+    const modes = ['docker', '/usr/local/bin/docker', 'sudo -n docker', 'sudo -n /usr/local/bin/docker']
+    if (entry.authType === 'password' && entry.password) {
+      modes.push('sudo -S docker', 'sudo -S /usr/local/bin/docker')
+    }
+    return modes
+  }
+
+  /** Expand a stored docker mode into the full command prefix for a host. */
+  private dockerPrefix(entry: HostEntry, mode: string): string {
+    if (mode.startsWith('sudo -S ')) {
+      return `echo ${shq(entry.password ?? '')} | sudo -S -p '' ${mode.slice('sudo -S '.length)}`
+    }
+    return mode
+  }
+
+  /** Resolve the working docker CLI for a host, caching the winning mode. */
   async dockerCommand(alias: string): Promise<string> {
-    const cached = this.store.get(alias)?.dockerCommand
-    if (cached) return cached
-    const candidates = ['docker', 'sudo -n docker']
-    for (const candidate of candidates) {
+    const host = this.store.get(alias)
+    if (!host) throw new Error(`unknown host alias: ${alias}`)
+    if (host.dockerCommand) return this.dockerPrefix(host, host.dockerCommand)
+    for (const mode of this.dockerModes(host)) {
       try {
-        const probe = await this.exec(alias, `${candidate} version --format '{{.Server.Version}}'`, { timeoutMs: 10_000 })
+        const probe = await this.exec(alias, `${this.dockerPrefix(host, mode)} version --format '{{.Server.Version}}'`, { timeoutMs: 10_000 })
         if (probe.code === 0 && probe.stdout.trim() !== '') {
-          this.store.remember(alias, { dockerCommand: candidate })
-          return candidate
+          this.store.remember(alias, { dockerCommand: mode })
+          return this.dockerPrefix(host, mode)
         }
       } catch { /* try next */ }
     }
-    throw new Error('docker is not reachable on this host (tried "docker" and "sudo -n docker"); check that the SSH user can run docker')
+    throw new Error('docker is not reachable on this host (tried docker, sudo -n, and sudo with the stored password); check that the SSH user can run docker')
+  }
+
+  /**
+   * Run one docker operation. When the cached invocation mode starts failing
+   * with an auth/not-found shape (host changed under us), forget it and retry
+   * once through the full resolution.
+   */
+  private async withDocker<T>(alias: string, fn: (docker: string) => Promise<T>): Promise<T> {
+    const docker = await this.dockerCommand(alias)
+    try {
+      return await fn(docker)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const hadCache = this.store.get(alias)?.dockerCommand !== undefined
+      if (hadCache && /not found|permission denied|sudo|a password is required/i.test(message)) {
+        this.store.remember(alias, { dockerCommand: undefined })
+        return fn(await this.dockerCommand(alias))
+      }
+      throw error
+    }
   }
 
   async dockerList(alias: string): Promise<DockerContainer[]> {
-    const docker = await this.dockerCommand(alias)
-    const format = "'{{json .}}'"
-    const list = await this.exec(alias, `${docker} ps -a --format ${format}`, { timeoutMs: 20_000 })
-    if (list.code !== 0) throw new Error(list.stderr.trim() || `docker ps failed (exit ${list.code})`)
-    const containers: DockerContainer[] = []
-    for (const line of list.stdout.split('\n')) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      try {
-        const row = JSON.parse(trimmed) as Record<string, string>
-        containers.push({
-          id: row.ID ?? '',
-          name: (row.Names ?? '').replace(/^\//, ''),
-          image: row.Image ?? '',
-          state: row.State ?? '',
-          status: row.Status ?? '',
-          ports: row.Ports ?? '',
-          createdAt: row.CreatedAt ?? '',
-        })
-      } catch { /* skip malformed line */ }
-    }
-    // Enrich with one-shot resource stats; failure is non-fatal.
-    try {
-      const stats = await this.exec(alias, `${docker} stats --no-stream --format ${format}`, { timeoutMs: 15_000 })
-      if (stats.code === 0) {
-        const byId = new Map(containers.map(c => [c.id, c]))
-        for (const line of stats.stdout.split('\n')) {
-          const trimmed = line.trim()
-          if (!trimmed) continue
-          try {
-            const row = JSON.parse(trimmed) as Record<string, string>
-            const target = byId.get(row.ID ?? '') ?? containers.find(c => c.name === (row.Name ?? ''))
-            if (target) {
-              target.cpuPercent = row.CPUPerc
-              target.memUsage = row.MemUsage
-            }
-          } catch { /* skip */ }
-        }
+    return this.withDocker(alias, async (docker) => {
+      const format = "'{{json .}}'"
+      const list = await this.exec(alias, `${docker} ps -a --format ${format}`, { timeoutMs: 20_000 })
+      if (list.code !== 0) throw new Error(list.stderr.trim() || `docker ps failed (exit ${list.code})`)
+      const containers: DockerContainer[] = []
+      for (const line of list.stdout.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        try {
+          const row = JSON.parse(trimmed) as Record<string, string>
+          containers.push({
+            id: row.ID ?? '',
+            name: (row.Names ?? '').replace(/^\//, ''),
+            image: row.Image ?? '',
+            state: row.State ?? '',
+            status: row.Status ?? '',
+            ports: row.Ports ?? '',
+            createdAt: row.CreatedAt ?? '',
+          })
+        } catch { /* skip malformed line */ }
       }
-    } catch { /* stats are best-effort */ }
-    return containers
+      // Enrich with one-shot resource stats; failure is non-fatal.
+      try {
+        const stats = await this.exec(alias, `${docker} stats --no-stream --format ${format}`, { timeoutMs: 15_000 })
+        if (stats.code === 0) {
+          const byId = new Map(containers.map(c => [c.id, c]))
+          for (const line of stats.stdout.split('\n')) {
+            const trimmed = line.trim()
+            if (!trimmed) continue
+            try {
+              const row = JSON.parse(trimmed) as Record<string, string>
+              const target = byId.get(row.ID ?? '') ?? containers.find(c => c.name === (row.Name ?? ''))
+              if (target) {
+                target.cpuPercent = row.CPUPerc
+                target.memUsage = row.MemUsage
+              }
+            } catch { /* skip */ }
+          }
+        }
+      } catch { /* stats are best-effort */ }
+      return containers
+    })
   }
 
   async dockerAction(alias: string, id: string, action: 'start' | 'stop' | 'restart'): Promise<void> {
-    const docker = await this.dockerCommand(alias)
     if (!/^[a-f0-9]{6,64}$/i.test(id) && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(id)) throw new Error('invalid container id')
-    const result = await this.exec(alias, `${docker} ${action} ${shq(id)}`, { timeoutMs: 60_000 })
-    if (result.code !== 0) throw new Error(result.stderr.trim() || `docker ${action} failed (exit ${result.code})`)
+    await this.withDocker(alias, async (docker) => {
+      const result = await this.exec(alias, `${docker} ${action} ${shq(id)}`, { timeoutMs: 60_000 })
+      if (result.code !== 0) throw new Error(result.stderr.trim() || `docker ${action} failed (exit ${result.code})`)
+    })
   }
 
   async dockerLogs(alias: string, id: string, tail: number): Promise<string> {
-    const docker = await this.dockerCommand(alias)
     const safeTail = Math.min(Math.max(Math.floor(tail) || 200, 1), 5000)
-    const result = await this.exec(alias, `${docker} logs --tail ${safeTail} ${shq(id)} 2>&1`, { timeoutMs: 30_000 })
-    return result.stdout
+    return this.withDocker(alias, async (docker) => {
+      const result = await this.exec(alias, `${docker} logs --tail ${safeTail} ${shq(id)} 2>&1`, { timeoutMs: 30_000 })
+      return result.stdout
+    })
   }
 
   /**
@@ -620,15 +665,23 @@ export class ServerEngine {
   // ------------------------------------------------------------- power
 
   async power(alias: string, action: 'reboot' | 'shutdown'): Promise<void> {
-    const command = action === 'reboot'
-      ? 'sudo -n reboot 2>/dev/null || reboot 2>/dev/null || sudo -n systemctl reboot 2>/dev/null || sudo -n shutdown -r now'
-      : 'sudo -n shutdown -h now 2>/dev/null || sudo -n poweroff 2>/dev/null || poweroff 2>/dev/null || sudo -n systemctl poweroff'
+    const host = this.store.get(alias)
+    if (!host) throw new Error(`unknown host alias: ${alias}`)
+    // sudo with the stored password first (works on DSM where admins can
+    // sudo), then passwordless sudo, then bare commands as a last resort.
+    const sudoPw = host.authType === 'password' && host.password
+      ? `echo ${shq(host.password)} | sudo -S -p ''`
+      : undefined
+    const chains: Array<string | undefined> = action === 'reboot'
+      ? [sudoPw && `${sudoPw} reboot`, 'sudo -n reboot 2>/dev/null', 'reboot 2>/dev/null', sudoPw && `${sudoPw} systemctl reboot`, 'sudo -n systemctl reboot 2>/dev/null', sudoPw && `${sudoPw} shutdown -r now`]
+      : [sudoPw && `${sudoPw} shutdown -h now`, 'sudo -n shutdown -h now 2>/dev/null', sudoPw && `${sudoPw} poweroff`, 'sudo -n poweroff 2>/dev/null', 'poweroff 2>/dev/null', sudoPw && `${sudoPw} systemctl poweroff`]
+    const command = chains.filter((c): c is string => typeof c === 'string').join(' || ')
     const result = await this.exec(alias, command, { timeoutMs: 15_000, tolerateAbruptClose: true })
     // Success shapes: exit 0, or the session dropped before any exit status
     // (-1) — expected when the machine actually goes down. A positive exit
     // code means the command really ran and refused (e.g. no sudo rights).
     if (result.code > 0) {
-      throw new Error(result.stderr.trim() || `${action} command failed (exit ${result.code}); does the SSH user have passwordless sudo?`)
+      throw new Error(result.stderr.trim() || `${action} command failed (exit ${result.code}); does the SSH user have sudo rights?`)
     }
     this.drop(alias)
   }

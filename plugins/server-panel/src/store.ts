@@ -121,8 +121,9 @@ export class HostStore {
     }
     const problems = validateHostPayload(merged, this.hosts, originalAlias)
     if (problems.length > 0) throw new Error(problems.join('; '))
-    // Connection-affecting change drops the detection cache.
-    if (merged.host !== current.host || merged.port !== current.port || merged.username !== current.username) {
+    // Connection- or credential-affecting change drops the detection caches.
+    if (merged.host !== current.host || merged.port !== current.port || merged.username !== current.username
+      || merged.authType !== current.authType || patch.password || patch.privateKey) {
       delete merged.detectedKind
       delete merged.dockerCommand
     }
