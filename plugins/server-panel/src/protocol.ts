@@ -20,9 +20,25 @@ export const API = {
   filesDelete: '/api/dsh-server-panel/files/delete',
   /** WebSocket upgrade path for streaming docker logs. */
   dockerLogsFollow: '/api/dsh-server-panel/docker/logs-follow',
+  /** WebSocket upgrade path for the interactive PTY terminal. */
+  terminal: '/api/dsh-server-panel/terminal',
+  tunnel: '/api/dsh-server-panel/tunnel',
+  tunnels: '/api/dsh-server-panel/tunnels',
 } as const
 
 export type AuthType = 'password' | 'key'
+
+/**
+ * One web portal of a host — e.g. the DSM web UI on :5000 or a Baota panel
+ * on :8888. `direct` opens http://host:port in the browser; `tunnel` first
+ * opens an SSH local-forward on the DSH host and then opens 127.0.0.1.
+ */
+export interface HostPortal {
+  name: string
+  port: number
+  path?: string
+  mode: 'direct' | 'tunnel'
+}
 
 /** Host configuration as the user edits it in the form (and as stored). */
 export interface HostPayload {
@@ -41,6 +57,8 @@ export interface HostPayload {
   /** Broadcast address for the magic packet; default 255.255.255.255. */
   wolBroadcast?: string
   notes?: string
+  /** Web UIs of this host the panel can jump to. */
+  portals?: HostPortal[]
 }
 
 /** Stored host entry: payload plus detection cache. */
@@ -66,6 +84,7 @@ export interface HostSummary {
   wolBroadcast?: string
   notes?: string
   detectedKind?: 'dsm' | 'linux'
+  portals?: HostPortal[]
 }
 
 export interface TestResult {
@@ -119,3 +138,22 @@ export interface RemoteFileEntry {
 }
 
 export type PowerAction = 'reboot' | 'shutdown'
+
+/** One live SSH local-forward tunnel. */
+export interface TunnelInfo {
+  alias: string
+  remotePort: number
+  localPort: number
+  /** The URL the browser should open. */
+  url: string
+}
+
+/** Terminal WebSocket frames, client → host. */
+export type TerminalClientFrame =
+  | { type: 'data'; data: string }
+  | { type: 'resize'; cols: number; rows: number }
+
+/** Terminal WebSocket frames, host → client. */
+export type TerminalServerFrame =
+  | { type: 'data'; text: string }
+  | { type: 'exit'; message?: string }

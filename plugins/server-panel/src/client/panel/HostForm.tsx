@@ -4,7 +4,7 @@
  */
 
 import { useState } from 'react'
-import type { HostPayload, HostSummary, TestResult } from '../../protocol.ts'
+import type { HostPayload, HostPortal, HostSummary, TestResult } from '../../protocol.ts'
 import { tt, type ServerPanelApi } from '../api.ts'
 
 export interface HostFormValue extends HostPayload {}
@@ -31,6 +31,7 @@ export function HostForm({ mode, host, api, onCancel, onSave }: HostFormProps): 
   const [wolMac, setWolMac] = useState(host?.wolMac ?? '')
   const [wolBroadcast, setWolBroadcast] = useState(host?.wolBroadcast ?? '')
   const [notes, setNotes] = useState(host?.notes ?? '')
+  const [portals, setPortals] = useState<HostPortal[]>(host?.portals ?? [])
   const [error, setError] = useState<string>()
   const [saving, setSaving] = useState(false)
   const [testState, setTestState] = useState<'idle' | 'testing' | { result: TestResult }>('idle')
@@ -49,6 +50,7 @@ export function HostForm({ mode, host, api, onCancel, onSave }: HostFormProps): 
     wolMac: wolMac.trim() || undefined,
     wolBroadcast: wolBroadcast.trim() || undefined,
     notes: notes.trim() || undefined,
+    portals: portals.filter(p => p.name.trim() !== '' && Number(p.port) > 0),
   })
 
   const onTest = async (): Promise<void> => {
@@ -160,6 +162,30 @@ export function HostForm({ mode, host, api, onCancel, onSave }: HostFormProps): 
           <span className="dshsp-field-label">{tt('host.form.notes')}</span>
           <input className="dshsp-input" value={notes} onChange={e => setNotes(e.target.value)} />
         </label>
+        <div className="dshsp-field">
+          <span className="dshsp-field-label">{tt('portal.section')}</span>
+          {portals.map((portal, index) => (
+            <div className="dshsp-formrow" key={index} style={{ gridTemplateColumns: '1.4fr 0.7fr 1fr 1.2fr auto' }}>
+              <input className="dshsp-input" placeholder={tt('portal.name')} value={portal.name}
+                onChange={e => setPortals(prev => prev.map((p, i) => i === index ? { ...p, name: e.target.value } : p))} />
+              <input className="dshsp-input" placeholder={tt('portal.port')} inputMode="numeric" value={String(portal.port || '')}
+                onChange={e => setPortals(prev => prev.map((p, i) => i === index ? { ...p, port: Number(e.target.value) || 0 } : p))} />
+              <input className="dshsp-input" placeholder={tt('portal.path')} value={portal.path ?? ''}
+                onChange={e => setPortals(prev => prev.map((p, i) => i === index ? { ...p, path: e.target.value } : p))} />
+              <select className="dshsp-input" value={portal.mode}
+                onChange={e => setPortals(prev => prev.map((p, i) => i === index ? { ...p, mode: e.target.value as 'direct' | 'tunnel' } : p))}>
+                <option value="direct">{tt('portal.mode.direct')}</option>
+                <option value="tunnel">{tt('portal.mode.tunnel')}</option>
+              </select>
+              <button className="dshsp-btn" data-danger="" onClick={() => setPortals(prev => prev.filter((_, i) => i !== index))}>{tt('portal.remove')}</button>
+            </div>
+          ))}
+          <div>
+            <button className="dshsp-btn" onClick={() => setPortals(prev => [...prev, { name: '', port: 0, path: '', mode: 'direct' }])}>
+              + {tt('portal.add')}
+            </button>
+          </div>
+        </div>
         {testState !== 'idle' && (
           <div className="dshsp-banner" data-kind={testState === 'testing' ? 'info' : testState.result.ok ? 'ok' : 'error'}>
             {testState === 'testing'

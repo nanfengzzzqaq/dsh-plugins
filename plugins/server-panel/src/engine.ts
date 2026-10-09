@@ -11,7 +11,8 @@
 
 import { Client as SshClient, type ClientChannel, type ConnectConfig, type SFTPWrapper } from 'ssh2'
 import { Socket as DgramSocket, createSocket } from 'node:dgram'
-import type { HostEntry, HostStatus, DiskInfo, DockerContainer, RemoteFileEntry, TestResult } from './protocol.ts'
+import { createServer, type Server as NetServer } from 'node:net'
+import type { HostEntry, HostStatus, DiskInfo, DockerContainer, RemoteFileEntry, TestResult, TunnelInfo } from './protocol.ts'
 import type { HostStore } from './store.ts'
 
 /** Idle connections are closed after this long without traffic. */
@@ -551,6 +552,71 @@ export class ServerEngine {
     }))
   }
 
+  // ------------------------------------------------------------- terminal
+
+  /**
+   * Open an interactive PTY shell on the host. The caller owns the channel:
+   * closing it ends the remote shell.
+   */
+  async shellChannel(alias: string, cols: number, rows: number): Promise<ClientChannel> {
+    const client = await this.connection(alias)
+    return new Promise((resolve, reject) => {
+      client.shell(
+        { term: 'xterm-256color', cols: Math.max(cols | 0, 20), rows: Math.max(rows | 0, 5) },
+        (error, channel) => error ? reject(error) : resolve(channel),
+      )
+    })
+  }
+
+  // ------------------------------------------------------------- tunnels
+
+  /** Live local-forward tunnels, keyed by `${alias}:${remotePort}`. */
+  private readonly tunnels = new Map<string, { server: NetServer; info: TunnelInfo }>()
+
+  listTunnels(alias?: string): TunnelInfo[] {
+    return [...this.tunnels.values()]
+      .filter(t => alias === undefined || t.info.alias === alias)
+      .map(t => t.info)
+  }
+
+  /**
+   * Open (or reuse) a local forward: 127.0.0.1:<localPort> on the DSH host →
+   * 127.0.0.1:<remotePort> on the remote. The URL answers the browser.
+   */
+  async openTunnel(alias: string, remotePort: number): Promise<TunnelInfo> {
+    const key = `${alias}:${remotePort}`
+    const existing = this.tunnels.get(key)
+    if (existing) return existing.info
+    if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) throw new Error('invalid remote port')
+    const client = await this.connection(alias)
+    const server = createServer((socket) => {
+      client.forwardOut('127.0.0.1', socket.localPort ?? 0, '127.0.0.1', remotePort, (error, channel) => {
+        if (error) { socket.destroy(); return }
+        socket.pipe(channel).pipe(socket)
+        socket.on('error', () => { try { channel.close() } catch { /* ignore */ } })
+        channel.on('error', () => { try { socket.destroy() } catch { /* ignore */ } })
+      })
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const localPort = (server.address() as { port: number }).port
+    const info: TunnelInfo = { alias, remotePort, localPort, url: `http://127.0.0.1:${localPort}` }
+    this.tunnels.set(key, { server, info })
+    server.on('close', () => { if (this.tunnels.get(key)?.server === server) this.tunnels.delete(key) })
+    return info
+  }
+
+  async stopTunnel(alias: string, remotePort: number): Promise<boolean> {
+    const key = `${alias}:${remotePort}`
+    const entry = this.tunnels.get(key)
+    if (!entry) return false
+    this.tunnels.delete(key)
+    await new Promise<void>((resolve) => { entry.server.close(() => resolve()) })
+    return true
+  }
+
   // ------------------------------------------------------------- power
 
   async power(alias: string, action: 'reboot' | 'shutdown'): Promise<void> {
@@ -595,6 +661,10 @@ export class ServerEngine {
   // ------------------------------------------------------------- lifecycle
 
   dispose(): void {
+    for (const key of [...this.tunnels.keys()]) {
+      const [alias, port] = key.split(':')
+      void this.stopTunnel(alias, Number(port))
+    }
     for (const alias of [...this.pool.keys()]) this.drop(alias)
   }
 }

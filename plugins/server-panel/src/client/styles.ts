@@ -106,6 +106,15 @@ export const PANEL_CSS = `
 .dshsp-filename[data-dir] { color: var(--dsw-alias-state-business-primary); cursor: pointer; font-weight: 500; }
 .dshsp-row-actions { display: flex; gap: 6px; white-space: nowrap; }
 .dshsp-hint { color: var(--dsw-alias-label-tertiary); font-size: 11.5px; }
+.dshsp-tabbody-flush { padding: 0; overflow: hidden; }
+.dshsp-term-wrap { position: relative; flex: 1; min-height: 0; display: flex; overflow: hidden; }
+.dshsp-term { flex: 1; min-height: 0; background: #0b0e14; padding: 8px 0 8px 10px; }
+.dshsp-term .xterm { height: 100%; }
+.dshsp-term-overlay { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 12px; background: rgba(11, 14, 20, .72);
+  color: #d3e1f5; font-size: 13px; }
+.dshsp-btn[data-portal] { color: var(--dsw-alias-state-business-primary);
+  border-color: var(--dsw-alias-state-business-primary); }
 `
 
 /** Inject the stylesheet once; returns a disposer removing it. */

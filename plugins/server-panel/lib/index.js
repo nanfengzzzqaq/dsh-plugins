@@ -24,6 +24,15 @@ function validateHostPayload(body, existing, originalAlias) {
     problems.push("password is required for password auth");
   if (body.wolMac && !/^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(body.wolMac.trim()))
     problems.push("wolMac must look like 01:23:45:67:89:ab");
+  if (body.portals !== void 0) {
+    if (!Array.isArray(body.portals)) problems.push("portals must be an array");
+    else for (const portal of body.portals) {
+      if (!portal.name || !String(portal.name).trim()) problems.push("portal name is required");
+      const port2 = Number(portal.port);
+      if (!Number.isInteger(port2) || port2 < 1 || port2 > 65535) problems.push(`portal "${portal.name ?? "?"}" port must be 1..65535`);
+      if (portal.mode !== "direct" && portal.mode !== "tunnel") problems.push(`portal "${portal.name ?? "?"}" mode must be direct or tunnel`);
+    }
+  }
   return problems;
 }
 var HostStore = class {
@@ -124,7 +133,8 @@ var HostStore = class {
       wolMac: entry.wolMac,
       wolBroadcast: entry.wolBroadcast,
       notes: entry.notes,
-      detectedKind: entry.detectedKind
+      detectedKind: entry.detectedKind,
+      portals: entry.portals
     };
   }
 };
@@ -132,6 +142,7 @@ var HostStore = class {
 // src/engine.ts
 import { Client as SshClient } from "ssh2";
 import { createSocket } from "node:dgram";
+import { createServer } from "node:net";
 var IDLE_TIMEOUT_MS = 15 * 60 * 1e3;
 var READY_TIMEOUT_MS = 15e3;
 var EXEC_TIMEOUT_MS = 3e4;
@@ -647,6 +658,79 @@ var ServerEngine = class _ServerEngine {
       else sftp.unlink(remotePath, done);
     }));
   }
+  // ------------------------------------------------------------- terminal
+  /**
+   * Open an interactive PTY shell on the host. The caller owns the channel:
+   * closing it ends the remote shell.
+   */
+  async shellChannel(alias, cols, rows) {
+    const client = await this.connection(alias);
+    return new Promise((resolve, reject) => {
+      client.shell(
+        { term: "xterm-256color", cols: Math.max(cols | 0, 20), rows: Math.max(rows | 0, 5) },
+        (error, channel) => error ? reject(error) : resolve(channel)
+      );
+    });
+  }
+  // ------------------------------------------------------------- tunnels
+  /** Live local-forward tunnels, keyed by `${alias}:${remotePort}`. */
+  tunnels = /* @__PURE__ */ new Map();
+  listTunnels(alias) {
+    return [...this.tunnels.values()].filter((t) => alias === void 0 || t.info.alias === alias).map((t) => t.info);
+  }
+  /**
+   * Open (or reuse) a local forward: 127.0.0.1:<localPort> on the DSH host →
+   * 127.0.0.1:<remotePort> on the remote. The URL answers the browser.
+   */
+  async openTunnel(alias, remotePort) {
+    const key = `${alias}:${remotePort}`;
+    const existing = this.tunnels.get(key);
+    if (existing) return existing.info;
+    if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) throw new Error("invalid remote port");
+    const client = await this.connection(alias);
+    const server = createServer((socket) => {
+      client.forwardOut("127.0.0.1", socket.localPort ?? 0, "127.0.0.1", remotePort, (error, channel) => {
+        if (error) {
+          socket.destroy();
+          return;
+        }
+        socket.pipe(channel).pipe(socket);
+        socket.on("error", () => {
+          try {
+            channel.close();
+          } catch {
+          }
+        });
+        channel.on("error", () => {
+          try {
+            socket.destroy();
+          } catch {
+          }
+        });
+      });
+    });
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const localPort = server.address().port;
+    const info = { alias, remotePort, localPort, url: `http://127.0.0.1:${localPort}` };
+    this.tunnels.set(key, { server, info });
+    server.on("close", () => {
+      if (this.tunnels.get(key)?.server === server) this.tunnels.delete(key);
+    });
+    return info;
+  }
+  async stopTunnel(alias, remotePort) {
+    const key = `${alias}:${remotePort}`;
+    const entry = this.tunnels.get(key);
+    if (!entry) return false;
+    this.tunnels.delete(key);
+    await new Promise((resolve) => {
+      entry.server.close(() => resolve());
+    });
+    return true;
+  }
   // ------------------------------------------------------------- power
   async power(alias, action) {
     const command = action === "reboot" ? "sudo -n reboot 2>/dev/null || reboot 2>/dev/null || sudo -n systemctl reboot 2>/dev/null || sudo -n shutdown -r now" : "sudo -n shutdown -h now 2>/dev/null || sudo -n poweroff 2>/dev/null || poweroff 2>/dev/null || sudo -n systemctl poweroff";
@@ -685,6 +769,10 @@ var ServerEngine = class _ServerEngine {
   }
   // ------------------------------------------------------------- lifecycle
   dispose() {
+    for (const key of [...this.tunnels.keys()]) {
+      const [alias, port] = key.split(":");
+      void this.stopTunnel(alias, Number(port));
+    }
     for (const alias of [...this.pool.keys()]) this.drop(alias);
   }
 };
@@ -708,7 +796,11 @@ var API = {
   filesRename: "/api/dsh-server-panel/files/rename",
   filesDelete: "/api/dsh-server-panel/files/delete",
   /** WebSocket upgrade path for streaming docker logs. */
-  dockerLogsFollow: "/api/dsh-server-panel/docker/logs-follow"
+  dockerLogsFollow: "/api/dsh-server-panel/docker/logs-follow",
+  /** WebSocket upgrade path for the interactive PTY terminal. */
+  terminal: "/api/dsh-server-panel/terminal",
+  tunnel: "/api/dsh-server-panel/tunnel",
+  tunnels: "/api/dsh-server-panel/tunnels"
 };
 
 // src/http.ts
@@ -1118,10 +1210,132 @@ function makeRoutes(deps) {
           writeJson(res, 502, { error: errorMessage(error) });
         }
       }
+    },
+    // ------------------------------------------------------------ tunnels
+    {
+      kind: "exact",
+      path: API.tunnel,
+      handler: async (req, res) => {
+        if (!fence(req, res)) return;
+        if (req.method !== "POST") {
+          writeJson(res, 405, { error: "method not allowed" });
+          return;
+        }
+        const body = await readJsonBody(req);
+        if (body === null) {
+          writeJson(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        try {
+          writeJson(res, 200, { tunnel: await engine.openTunnel(String(body.alias), Number(body.port)) });
+        } catch (error) {
+          writeJson(res, 502, { error: errorMessage(error) });
+        }
+      }
+    },
+    {
+      kind: "exact",
+      path: API.tunnels,
+      handler: async (req, res) => {
+        if (!fence(req, res)) return;
+        const url = new URL(req.url ?? "/", "http://localhost");
+        if (req.method === "GET") {
+          writeJson(res, 200, { tunnels: engine.listTunnels(queryParam(url, "alias")) });
+          return;
+        }
+        if (req.method === "DELETE") {
+          try {
+            const stopped = await engine.stopTunnel(requiredParam(url, "alias"), Number(requiredParam(url, "port")));
+            writeJson(res, stopped ? 200 : 404, { ok: stopped });
+          } catch (error) {
+            writeJson(res, 400, { error: errorMessage(error) });
+          }
+          return;
+        }
+        writeJson(res, 405, { error: "method not allowed" });
+      }
     }
   ];
   const logsWss = new WebSocketServer({ noServer: true });
+  const terminalWss = new WebSocketServer({ noServer: true });
   const upgrades = [
+    {
+      path: API.terminal,
+      handler: (req, socket, head) => {
+        if (!isLoopbackRequest(req)) {
+          socket.destroy();
+          return;
+        }
+        const url = new URL(req.url ?? "/", "http://localhost");
+        const alias = queryParam(url, "alias");
+        const cols = Number(queryParam(url, "cols") ?? "80");
+        const rows = Number(queryParam(url, "rows") ?? "24");
+        if (!alias) {
+          socket.destroy();
+          return;
+        }
+        terminalWss.handleUpgrade(req, socket, head, (ws) => {
+          let channel;
+          let closed = false;
+          const shutdown = () => {
+            if (closed) return;
+            closed = true;
+            try {
+              channel?.close();
+            } catch {
+            }
+            try {
+              ws.close();
+            } catch {
+            }
+          };
+          engine.shellChannel(alias, cols, rows).then((ch) => {
+            if (closed) {
+              try {
+                ch.close();
+              } catch {
+              }
+              return;
+            }
+            channel = ch;
+            const send = (text) => {
+              try {
+                ws.send(JSON.stringify({ type: "data", text }));
+              } catch {
+              }
+            };
+            ch.on("data", (data) => send(data.toString("utf8")));
+            ch.stderr?.on("data", (data) => send(data.toString("utf8")));
+            ch.on("close", () => {
+              try {
+                ws.send(JSON.stringify({ type: "exit" }));
+              } catch {
+              }
+              shutdown();
+            });
+          }, (error) => {
+            try {
+              ws.send(JSON.stringify({ type: "exit", message: errorMessage(error) }));
+            } catch {
+            }
+            shutdown();
+          });
+          ws.on("message", (raw) => {
+            if (!channel) return;
+            try {
+              const frame = JSON.parse(String(raw));
+              if (frame.type === "data" && typeof frame.data === "string") channel.write(frame.data);
+              else if (frame.type === "resize" && frame.cols && frame.rows) {
+                channel.setWindow(Math.max(Math.floor(frame.rows), 5), Math.max(Math.floor(frame.cols), 20), 0, 0);
+              }
+            } catch {
+            }
+          });
+          ws.on("close", shutdown);
+          ws.on("error", shutdown);
+        });
+      }
+    },
     {
       path: API.dockerLogsFollow,
       handler: (req, socket, head) => {

@@ -43,6 +43,15 @@ export function validateHostPayload(body: Partial<HostPayload>, existing: HostEn
     problems.push('password is required for password auth')
   if (body.wolMac && !/^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(body.wolMac.trim()))
     problems.push('wolMac must look like 01:23:45:67:89:ab')
+  if (body.portals !== undefined) {
+    if (!Array.isArray(body.portals)) problems.push('portals must be an array')
+    else for (const portal of body.portals) {
+      if (!portal.name || !String(portal.name).trim()) problems.push('portal name is required')
+      const port = Number(portal.port)
+      if (!Number.isInteger(port) || port < 1 || port > 65535) problems.push(`portal "${portal.name ?? '?'}" port must be 1..65535`)
+      if (portal.mode !== 'direct' && portal.mode !== 'tunnel') problems.push(`portal "${portal.name ?? '?'}" mode must be direct or tunnel`)
+    }
+  }
   return problems
 }
 
@@ -153,6 +162,7 @@ export class HostStore {
       wolBroadcast: entry.wolBroadcast,
       notes: entry.notes,
       detectedKind: entry.detectedKind,
+      portals: entry.portals,
     }
   }
 }

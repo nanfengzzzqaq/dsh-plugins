@@ -52,6 +52,9 @@ await build({
   target: 'es2020',
   sourcemap: false,
   jsx: 'automatic',
+  // .css imports (xterm's stylesheet) arrive as plain text and get injected
+  // by the plugin at apply time — no CSS pipeline needed.
+  loader: { '.css': 'text' },
   external: ['react', 'react-dom', 'react/jsx-runtime', '@deepseek-ai/*'],
   logLevel: 'info',
 })

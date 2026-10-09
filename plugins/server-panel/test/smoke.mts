@@ -6,10 +6,12 @@
  * Run from the plugin dir so ssh2/ws resolve: node test/smoke.mjs
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { connect as netConnect } from 'node:net'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import ssh2 from 'ssh2'
+import WebSocket from 'ws'
 
 const { Server: SshServer } = ssh2
 const { generateKeyPairSync } = ssh2.utils
@@ -28,6 +30,14 @@ function check(name: string, cond: boolean, detail?: unknown): void {
 
 // ---------------------------------------------------------- fake SSH server
 const hostKeyPem = generateKeyPairSync('ed25519').private
+
+// A local HTTP target the SSH tunnel will forward to (the "NAS web UI").
+const portalTarget = createServer((req, res) => {
+  res.writeHead(200, { 'content-type': 'text/plain' })
+  res.end('portal-ok')
+})
+await new Promise<void>((resolve) => portalTarget.listen(0, '127.0.0.1', resolve))
+const portalPort = (portalTarget.address() as { port: number }).port
 
 const STATUS_OUTPUT = `__HOSTNAME__
 mynas
@@ -67,8 +77,24 @@ const sshServer = new SshServer({ hostKeys: [hostKeyPem] }, (client) => {
     else auth.reject()
   })
   client.on('ready', () => {
+    // direct-tcpip (forwardOut) arrives at the CLIENT level, not the session.
+    client.on('tcpip', (acceptTcp, _rejectTcp, info) => {
+      const channel = acceptTcp()
+      const target = netConnect(info.destPort === 5000 ? portalPort : info.destPort, '127.0.0.1', () => {
+        channel.pipe(target).pipe(channel)
+      })
+      target.on('error', () => channel.close())
+    })
     client.on('session', (accept) => {
       const session = accept()
+      // PTY + shell for the terminal test: echo everything back.
+      session.on('pty', (acceptPty) => acceptPty())
+      session.on('shell', (acceptShell) => {
+        const channel = acceptShell()
+        channel.write('fake-shell$ ')
+        channel.on('data', (data: Buffer) => channel.write(data))
+        channel.on('close', () => channel.end())
+      })
       session.on('exec', (acceptExec, _reject, info) => {
         const channel = acceptExec()
         const command = info.command
@@ -123,12 +149,18 @@ check('routes registered', registeredRoutes.length >= 10, registeredRoutes.lengt
 check('logs-follow upgrade registered', registeredUpgrades.some(u => u.path === API.dockerLogsFollow))
 
 // ---------------------------------------------------------- real HTTP server
-const { routes } = makeRoutes({ store, engine })
+const { routes, upgrades } = makeRoutes({ store, engine })
 const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
   const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
   const route = routes.find(r => r.path === pathname)
   if (!route) { res.writeHead(404); res.end('nope'); return }
   void (route.handler as (q: IncomingMessage, s: ServerResponse) => Promise<void>)(req, res)
+})
+httpServer.on('upgrade', (req, socket, head) => {
+  const pathname = new URL(req.url ?? '/', 'http://localhost').pathname
+  const upgrade = upgrades.find(u => u.path === pathname)
+  if (!upgrade) { socket.destroy(); return }
+  void (upgrade.handler as (q: IncomingMessage, s: unknown, h: Buffer) => void)(req, socket, head)
 })
 await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve))
 const httpPort = (httpServer.address() as { port: number }).port
@@ -208,8 +240,52 @@ async function jpost(path: string, body: unknown): Promise<{ status: number; bod
   } catch { check('duplicate alias rejected', true) }
 }
 
+// ---------------------------------------------------------- terminal (WS PTY)
+{
+  const ws = new WebSocket(`ws://127.0.0.1:${httpPort}${API.terminal}?alias=nas&cols=80&rows=24`)
+  let transcript = ''
+  let sent = false
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('terminal test timed out; transcript=' + JSON.stringify(transcript))), 8000)
+    ws.on('message', (raw) => {
+      const frame = JSON.parse(String(raw)) as { type: string; text?: string }
+      if (frame.type === 'data') transcript += frame.text
+      if (!sent && transcript.includes('fake-shell$')) {
+        sent = true
+        ws.send(JSON.stringify({ type: 'data', data: 'echo hello-server-panel\n' }))
+      }
+      if (transcript.includes('hello-server-panel\n')) {
+        clearTimeout(timer)
+        resolve()
+      }
+    })
+    ws.on('error', reject)
+  })
+  check('terminal PTY echo over WS', transcript.includes('hello-server-panel'))
+  ws.send(JSON.stringify({ type: 'resize', cols: 120, rows: 40 }))
+  ws.close()
+}
+
+// ---------------------------------------------------------- tunnel (local forward)
+{
+  const { body } = await jpost(API.tunnel, { alias: 'nas', port: 5000 })
+  const tunnel = (body as { tunnel: { localPort: number; url: string } }).tunnel
+  check('tunnel opened with url', typeof tunnel.localPort === 'number' && tunnel.url.includes('127.0.0.1'), tunnel)
+  const response = await fetch(tunnel.url)
+  const text = await response.text()
+  check('tunnel forwards HTTP to the remote service', text === 'portal-ok', text)
+  // reopening reuses the same tunnel
+  const { body: again } = await jpost(API.tunnel, { alias: 'nas', port: 5000 })
+  check('tunnel reused', (again as { tunnel: { localPort: number } }).tunnel.localPort === tunnel.localPort)
+  const { body: list } = await jget(API.tunnels + '?alias=nas')
+  check('tunnel listed', (list as { tunnels: unknown[] }).tunnels.length === 1)
+  const stopResponse = await fetch(`${base}${API.tunnels}?alias=nas&port=5000`, { method: 'DELETE' })
+  check('tunnel stopped', stopResponse.status === 200)
+}
+
 engine.dispose()
 sshServer.close()
 httpServer.close()
+portalTarget.close()
 console.log(failures === 0 ? '\nALL SERVER-PANEL SMOKE TESTS PASSED' : `\n${failures} FAILURES`)
 process.exit(failures === 0 ? 0 : 1)

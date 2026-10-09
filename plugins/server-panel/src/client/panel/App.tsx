@@ -4,14 +4,15 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import type { HostSummary } from '../../protocol.ts'
+import type { HostPortal, HostSummary } from '../../protocol.ts'
 import { tt, type ServerPanelApi } from '../api.ts'
 import { HostForm, type HostFormValue } from './HostForm.tsx'
 import { OverviewTab } from './OverviewTab.tsx'
 import { DockerTab } from './DockerTab.tsx'
 import { FilesTab } from './FilesTab.tsx'
+import { TerminalTab } from './TerminalTab.tsx'
 
-type Tab = 'overview' | 'docker' | 'files'
+type Tab = 'terminal' | 'overview' | 'docker' | 'files'
 
 type ProbeState = 'unknown' | 'testing' | 'ok' | 'fail'
 
@@ -23,7 +24,7 @@ export function App({ api }: AppProps): React.ReactElement {
   const [hosts, setHosts] = useState<HostSummary[]>([])
   const [loadError, setLoadError] = useState<string>()
   const [selectedAlias, setSelectedAlias] = useState<string>()
-  const [tab, setTab] = useState<Tab>('docker')
+  const [tab, setTab] = useState<Tab>('terminal')
   const [probes, setProbes] = useState<Record<string, ProbeState>>({})
   const [dialog, setDialog] = useState<{ mode: 'add' } | { mode: 'edit'; host: HostSummary } | null>(null)
   const [notice, setNotice] = useState<{ kind: 'ok' | 'error'; text: string }>()
@@ -117,13 +118,14 @@ export function App({ api }: AppProps): React.ReactElement {
             <>
               <DetailHeader api={api} host={selected} onChanged={() => void reload()} />
               <div className="dshsp-tabs">
-                {(['docker', 'overview', 'files'] as Tab[]).map(name => (
+                {(['terminal', 'docker', 'overview', 'files'] as Tab[]).map(name => (
                   <button key={name} className="dshsp-tab" data-active={tab === name ? '' : undefined} onClick={() => setTab(name)}>
-                    {tt(name === 'docker' ? 'tab.docker' : name === 'overview' ? 'tab.overview' : 'tab.files')}
+                    {tt(name === 'terminal' ? 'tab.terminal' : name === 'docker' ? 'tab.docker' : name === 'overview' ? 'tab.overview' : 'tab.files')}
                   </button>
                 ))}
               </div>
-              <div className="dshsp-tabbody">
+              <div className={tab === 'terminal' ? 'dshsp-tabbody dshsp-tabbody-flush' : 'dshsp-tabbody'}>
+                {tab === 'terminal' && <TerminalTab key={selected.alias} api={api} alias={selected.alias} />}
                 {tab === 'overview' && <OverviewTab api={api} alias={selected.alias} />}
                 {tab === 'docker' && <DockerTab api={api} alias={selected.alias} />}
                 {tab === 'files' && <FilesTab api={api} alias={selected.alias} />}
@@ -147,7 +149,7 @@ export function App({ api }: AppProps): React.ReactElement {
   )
 }
 
-/** Detail header: host identity + power actions with confirmation. */
+/** Detail header: host identity + web portal jumps + power actions. */
 function DetailHeader({ api, host, onChanged }: { api: ServerPanelApi; host: HostSummary; onChanged: () => void }): React.ReactElement {
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string }>()
   const [busy, setBusy] = useState(false)
@@ -173,12 +175,40 @@ function DetailHeader({ api, host, onChanged }: { api: ServerPanelApi; host: Hos
     }
   }
 
+  const openPortal = async (portal: HostPortal): Promise<void> => {
+    setMessage(undefined)
+    const path = portal.path?.startsWith('/') ? portal.path : portal.path ? `/${portal.path}` : ''
+    try {
+      if (portal.mode === 'tunnel') {
+        setMessage({ kind: 'ok', text: tt('portal.tunnel.opening') })
+        const tunnel = await api.openTunnel(host.alias, portal.port)
+        window.open(`${tunnel.url}${path}`, '_blank', 'noopener')
+        setMessage(undefined)
+      } else {
+        window.open(`http://${host.host}:${portal.port}${path}`, '_blank', 'noopener')
+      }
+    } catch (error) {
+      setMessage({ kind: 'error', text: tt('portal.failed', { error: error instanceof Error ? error.message : String(error) }) })
+    }
+  }
+
   return (
     <div className="dshsp-detail-head">
       <span className="dshsp-detail-title">{host.label}</span>
       <span className="dshsp-detail-sub">{host.username}@{host.host}:{host.port}</span>
       {host.detectedKind && <span className="dshsp-badge" data-kind={host.detectedKind}>{tt(host.detectedKind === 'dsm' ? 'overview.kind.dsm' : 'overview.kind.linux')}</span>}
       <span className="dshsp-spacer" />
+      {(host.portals ?? []).map((portal, index) => (
+        <button
+          key={`${portal.name}-${index}`}
+          className="dshsp-btn"
+          data-portal=""
+          title={portal.mode === 'tunnel' ? `SSH tunnel → 127.0.0.1 → :${portal.port}` : `http://${host.host}:${portal.port}`}
+          onClick={() => void openPortal(portal)}
+        >
+          {portal.mode === 'tunnel' ? '⇢ ' : '↗ '}{portal.name}
+        </button>
+      ))}
       {host.wolMac && <button className="dshsp-btn" disabled={busy} onClick={() => void run('wol')}>{tt('power.wol')}</button>}
       <button className="dshsp-btn" disabled={busy} onClick={() => void run('reboot')}>{tt('power.reboot')}</button>
       <button className="dshsp-btn" data-danger="" disabled={busy} onClick={() => void run('shutdown')}>{tt('power.shutdown')}</button>

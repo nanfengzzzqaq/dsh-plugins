@@ -12,6 +12,7 @@ import {
   type HostSummary,
   type RemoteFileEntry,
   type TestResult,
+  type TunnelInfo,
 } from '../protocol.ts'
 import { tt } from './i18n.ts'
 
@@ -112,6 +113,27 @@ export class ServerPanelApi {
   dockerLogsFollowUrl(alias: string, id: string, tail = 200): string {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     return `${protocol}//${window.location.host}${API.dockerLogsFollow}${query({ alias, id, tail })}`
+  }
+
+  /** WebSocket URL for the interactive terminal. */
+  terminalUrl(alias: string, cols: number, rows: number): string {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${protocol}//${window.location.host}${API.terminal}${query({ alias, cols, rows })}`
+  }
+
+  /** Open (or reuse) an SSH local-forward and answer the URL to open. */
+  async openTunnel(alias: string, port: number): Promise<TunnelInfo> {
+    const data = await post<{ tunnel: TunnelInfo }>(API.tunnel, { alias, port })
+    return data.tunnel
+  }
+
+  async listTunnels(alias: string): Promise<TunnelInfo[]> {
+    const data = await readJson<{ tunnels: TunnelInfo[] }>(await fetch(API.tunnels + query({ alias })))
+    return data.tunnels
+  }
+
+  async stopTunnel(alias: string, port: number): Promise<void> {
+    await readJson(await fetch(API.tunnels + query({ alias, port }), { method: 'DELETE' }))
   }
 
   async power(alias: string, action: 'reboot' | 'shutdown'): Promise<void> {

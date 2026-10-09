@@ -1,6 +1,6 @@
 {
   "name": "dsh-server-panel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DSH 服务器 / NAS 可视化管理面板：主机状态、Docker 容器管理、远程文件浏览、重启/关机/WOL 电源操作",
   "type": "module",
   "main": "lib/index.js",
@@ -54,6 +54,8 @@
     "@types/react-dom": "^18.3.1",
     "@types/ssh2": "^1.15.4",
     "@types/ws": "^8.5.13",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "esbuild": "^0.24.2",
     "typescript": "~5.7.2"
   },

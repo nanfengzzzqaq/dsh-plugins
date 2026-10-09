@@ -310,11 +310,100 @@ export function makeRoutes(deps: ServerPanelRoutesDeps): { routes: WebRoute[]; u
         }
       },
     },
+
+    // ------------------------------------------------------------ tunnels
+    {
+      kind: 'exact',
+      path: API.tunnel,
+      handler: async (req, res) => {
+        if (!fence(req, res)) return
+        if (req.method !== 'POST') { writeJson(res, 405, { error: 'method not allowed' }); return }
+        const body = await readJsonBody(req)
+        if (body === null) { writeJson(res, 400, { error: 'invalid JSON body' }); return }
+        try {
+          writeJson(res, 200, { tunnel: await engine.openTunnel(String(body.alias), Number(body.port)) })
+        } catch (error) {
+          writeJson(res, 502, { error: errorMessage(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: API.tunnels,
+      handler: async (req, res) => {
+        if (!fence(req, res)) return
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        if (req.method === 'GET') {
+          writeJson(res, 200, { tunnels: engine.listTunnels(queryParam(url, 'alias')) })
+          return
+        }
+        if (req.method === 'DELETE') {
+          try {
+            const stopped = await engine.stopTunnel(requiredParam(url, 'alias'), Number(requiredParam(url, 'port')))
+            writeJson(res, stopped ? 200 : 404, { ok: stopped })
+          } catch (error) {
+            writeJson(res, 400, { error: errorMessage(error) })
+          }
+          return
+        }
+        writeJson(res, 405, { error: 'method not allowed' })
+      },
+    },
   ]
 
   // ------------------------------------------------- logs follow (WebSocket)
   const logsWss = new WebSocketServer({ noServer: true })
+  const terminalWss = new WebSocketServer({ noServer: true })
   const upgrades: WebUpgradeRoute[] = [
+    {
+      path: API.terminal,
+      handler: (req, socket, head) => {
+        if (!isLoopbackRequest(req)) { socket.destroy(); return }
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const alias = queryParam(url, 'alias')
+        const cols = Number(queryParam(url, 'cols') ?? '80')
+        const rows = Number(queryParam(url, 'rows') ?? '24')
+        if (!alias) { socket.destroy(); return }
+        terminalWss.handleUpgrade(req, socket, head, (ws: WsSocket) => {
+          let channel: ClientChannel | undefined
+          let closed = false
+          const shutdown = (): void => {
+            if (closed) return
+            closed = true
+            try { channel?.close() } catch { /* ignore */ }
+            try { ws.close() } catch { /* ignore */ }
+          }
+          engine.shellChannel(alias, cols, rows).then((ch) => {
+            if (closed) { try { ch.close() } catch { /* ignore */ } return }
+            channel = ch
+            const send = (text: string): void => {
+              try { ws.send(JSON.stringify({ type: 'data', text })) } catch { /* ignore */ }
+            }
+            ch.on('data', (data: Buffer) => send(data.toString('utf8')))
+            ch.stderr?.on('data', (data: Buffer) => send(data.toString('utf8')))
+            ch.on('close', () => {
+              try { ws.send(JSON.stringify({ type: 'exit' })) } catch { /* ignore */ }
+              shutdown()
+            })
+          }, (error) => {
+            try { ws.send(JSON.stringify({ type: 'exit', message: errorMessage(error) })) } catch { /* ignore */ }
+            shutdown()
+          })
+          ws.on('message', (raw) => {
+            if (!channel) return
+            try {
+              const frame = JSON.parse(String(raw)) as { type: string; data?: string; cols?: number; rows?: number }
+              if (frame.type === 'data' && typeof frame.data === 'string') channel.write(frame.data)
+              else if (frame.type === 'resize' && frame.cols && frame.rows) {
+                channel.setWindow(Math.max(Math.floor(frame.rows), 5), Math.max(Math.floor(frame.cols), 20), 0, 0)
+              }
+            } catch { /* ignore malformed frame */ }
+          })
+          ws.on('close', shutdown)
+          ws.on('error', shutdown)
+        })
+      },
+    },
     {
       path: API.dockerLogsFollow,
       handler: (req, socket, head) => {
