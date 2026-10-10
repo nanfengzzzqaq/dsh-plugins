@@ -23,6 +23,30 @@ export class ServerPanelApiError extends Error {
   }
 }
 
+/**
+ * The ws(s) base for socket routes. A web page dials its own origin; an
+ * application-delivered page (the DSH Desktop shell serves its GUI from
+ * dsh-app://app/) cannot carry a socket on its own scheme — its protocol
+ * handler forwards HTTP but has no upgrade to forward — so the socket goes
+ * to the shell-published loopback authority (__DSH_TRANSPORT__.streamBaseUrl).
+ */
+function socketBase(): { protocol: string; host: string } | undefined {
+  const protocol = window.location.protocol
+  if (protocol === 'http:' || protocol === 'https:') {
+    return { protocol: protocol === 'https:' ? 'wss:' : 'ws:', host: window.location.host }
+  }
+  const published = (globalThis as { __DSH_TRANSPORT__?: { streamBaseUrl?: unknown } }).__DSH_TRANSPORT__?.streamBaseUrl
+  if (typeof published === 'string' && published !== '') {
+    try {
+      const url = new URL(published)
+      if ((url.protocol === 'http:' || url.protocol === 'https:') && url.host !== '' && url.username === '' && url.password === '') {
+        return { protocol: url.protocol === 'https:' ? 'wss:' : 'ws:', host: url.host }
+      }
+    } catch { /* fall through */ }
+  }
+  return undefined
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   let body: unknown
   try {
@@ -109,16 +133,18 @@ export class ServerPanelApi {
     return data.logs
   }
 
-  /** WebSocket URL for the streaming logs endpoint. */
-  dockerLogsFollowUrl(alias: string, id: string, tail = 200): string {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${protocol}//${window.location.host}${API.dockerLogsFollow}${query({ alias, id, tail })}`
+  /** WebSocket URL for the streaming logs endpoint; undefined when this page cannot carry a socket. */
+  dockerLogsFollowUrl(alias: string, id: string, tail = 200): string | undefined {
+    const base = socketBase()
+    if (base === undefined) return undefined
+    return `${base.protocol}//${base.host}${API.dockerLogsFollow}${query({ alias, id, tail })}`
   }
 
-  /** WebSocket URL for the interactive terminal. */
-  terminalUrl(alias: string, cols: number, rows: number): string {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${protocol}//${window.location.host}${API.terminal}${query({ alias, cols, rows })}`
+  /** WebSocket URL for the interactive terminal; undefined when this page cannot carry a socket. */
+  terminalUrl(alias: string, cols: number, rows: number): string | undefined {
+    const base = socketBase()
+    if (base === undefined) return undefined
+    return `${base.protocol}//${base.host}${API.terminal}${query({ alias, cols, rows })}`
   }
 
   /** Open (or reuse) an SSH local-forward and answer the URL to open. */

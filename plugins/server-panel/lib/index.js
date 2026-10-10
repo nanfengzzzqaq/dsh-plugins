@@ -887,21 +887,34 @@ function errorMessage(error) {
 }
 
 // src/loopback.ts
-var LOOPBACK_HOSTS = /* @__PURE__ */ new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"]);
+function isIPv4Loopback(v4) {
+  const parts = v4.split(".");
+  return parts.length === 4 && parts[0] === "127" && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+}
 function isLoopbackAddress(address) {
   if (!address) return false;
-  return LOOPBACK_HOSTS.has(address);
+  const normalized = address.toLowerCase();
+  if (normalized === "::1") return true;
+  if (normalized.startsWith("::ffff:")) return isIPv4Loopback(normalized.slice("::ffff:".length));
+  return isIPv4Loopback(normalized);
+}
+function isLoopbackHostname(hostname) {
+  if (hostname === "localhost" || hostname === "[::1]") return true;
+  return isIPv4Loopback(hostname);
 }
 function isLoopbackRequest(req) {
-  const remote = req.socket.remoteAddress;
-  if (!isLoopbackAddress(remote)) return false;
+  if (!isLoopbackAddress(req.socket.remoteAddress)) return false;
   const host = req.headers.host;
   if (typeof host === "string" && host !== "") {
-    const hostname = host.replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
-    if (!LOOPBACK_HOSTS.has(hostname)) return false;
+    let hostUrl;
+    try {
+      hostUrl = new URL("http://" + host);
+    } catch {
+      return false;
+    }
+    if (!isLoopbackHostname(hostUrl.hostname)) return false;
   }
-  const fetchSite = req.headers["sec-fetch-site"];
-  if (typeof fetchSite === "string" && fetchSite === "cross-site") return false;
+  if (req.headers["sec-fetch-site"] === "cross-site") return false;
   return true;
 }
 

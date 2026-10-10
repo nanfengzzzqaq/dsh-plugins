@@ -174,7 +174,8 @@ var zh = {
   "portal.section": "Web \u7AEF\u5165\u53E3\uFF08\u5982 DSM \u7BA1\u7406\u9875 :5000\u3001\u5B9D\u5854 :8888\uFF09",
   "portal.remove": "\u79FB\u9664",
   "portal.tunnel.opening": "\u6B63\u5728\u5EFA\u7ACB\u96A7\u9053\u2026",
-  "portal.failed": "\u6253\u5F00\u5931\u8D25\uFF1A{error}"
+  "portal.failed": "\u6253\u5F00\u5931\u8D25\uFF1A{error}",
+  "term.unavailable": "\u5F53\u524D\u9875\u9762\u65E0\u6CD5\u5EFA\u7ACB WebSocket \u8FDE\u63A5\uFF08\u8BF7\u901A\u8FC7\u6D4F\u89C8\u5668\u8BBF\u95EE Web GUI \u4F7F\u7528\u6B64\u529F\u80FD\uFF09"
 };
 var en = {
   "entry.label": "Servers",
@@ -296,7 +297,8 @@ var en = {
   "portal.section": "Web portals (e.g. DSM on :5000, Baota on :8888)",
   "portal.remove": "Remove",
   "portal.tunnel.opening": "Opening tunnel\u2026",
-  "portal.failed": "Open failed: {error}"
+  "portal.failed": "Open failed: {error}",
+  "term.unavailable": "This page cannot open a WebSocket (use the Web GUI in a browser for this feature)"
 };
 
 // src/client/i18n.ts
@@ -326,6 +328,23 @@ var ServerPanelApiError = class extends Error {
     this.name = "ServerPanelApiError";
   }
 };
+function socketBase() {
+  const protocol = window.location.protocol;
+  if (protocol === "http:" || protocol === "https:") {
+    return { protocol: protocol === "https:" ? "wss:" : "ws:", host: window.location.host };
+  }
+  const published = globalThis.__DSH_TRANSPORT__?.streamBaseUrl;
+  if (typeof published === "string" && published !== "") {
+    try {
+      const url = new URL(published);
+      if ((url.protocol === "http:" || url.protocol === "https:") && url.host !== "" && url.username === "" && url.password === "") {
+        return { protocol: url.protocol === "https:" ? "wss:" : "ws:", host: url.host };
+      }
+    } catch {
+    }
+  }
+  return void 0;
+}
 async function readJson(response) {
   let body;
   try {
@@ -397,15 +416,17 @@ var ServerPanelApi = class {
     const data = await readJson(await fetch(API.dockerLogs + query({ alias, id, tail })));
     return data.logs;
   }
-  /** WebSocket URL for the streaming logs endpoint. */
+  /** WebSocket URL for the streaming logs endpoint; undefined when this page cannot carry a socket. */
   dockerLogsFollowUrl(alias, id, tail = 200) {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return `${protocol}//${window.location.host}${API.dockerLogsFollow}${query({ alias, id, tail })}`;
+    const base = socketBase();
+    if (base === void 0) return void 0;
+    return `${base.protocol}//${base.host}${API.dockerLogsFollow}${query({ alias, id, tail })}`;
   }
-  /** WebSocket URL for the interactive terminal. */
+  /** WebSocket URL for the interactive terminal; undefined when this page cannot carry a socket. */
   terminalUrl(alias, cols, rows) {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return `${protocol}//${window.location.host}${API.terminal}${query({ alias, cols, rows })}`;
+    const base = socketBase();
+    if (base === void 0) return void 0;
+    return `${base.protocol}//${base.host}${API.terminal}${query({ alias, cols, rows })}`;
   }
   /** Open (or reuse) an SSH local-forward and answer the URL to open. */
   async openTunnel(alias, port) {
@@ -983,7 +1004,12 @@ function LogsModal({ api, alias, container, onClose }) {
       setFollowing(false);
       return;
     }
-    const socket = new WebSocket(api.dockerLogsFollowUrl(alias, container.id, 200));
+    const url = api.dockerLogsFollowUrl(alias, container.id, 200);
+    if (url === void 0) {
+      setText(tt("term.unavailable"));
+      return;
+    }
+    const socket = new WebSocket(url);
     socketRef.current = socket;
     socket.onmessage = (event) => {
       try {
@@ -10582,15 +10608,15 @@ function installXtermCss() {
 }
 function TerminalTab({ api, alias }) {
   const containerRef = (0, import_react5.useRef)(null);
-  const termRef = (0, import_react5.useRef)();
-  const socketRef = (0, import_react5.useRef)();
   const [state, setState] = (0, import_react5.useState)("connecting");
+  const [closedReason, setClosedReason] = (0, import_react5.useState)();
   const [epoch, setEpoch] = (0, import_react5.useState)(0);
   (0, import_react5.useEffect)(() => {
     installXtermCss();
     const container = containerRef.current;
     if (!container) return;
     setState("connecting");
+    setClosedReason(void 0);
     const term = new Dl({
       cursorBlink: true,
       fontSize: 13,
@@ -10601,9 +10627,13 @@ function TerminalTab({ api, alias }) {
     term.loadAddon(fit);
     term.open(container);
     fit.fit();
-    termRef.current = term;
-    const socket = new WebSocket(api.terminalUrl(alias, term.cols, term.rows));
-    socketRef.current = socket;
+    const url = api.terminalUrl(alias, term.cols, term.rows);
+    if (url === void 0) {
+      setClosedReason(tt("term.unavailable"));
+      setState("closed");
+      return () => term.dispose();
+    }
+    const socket = new WebSocket(url);
     socket.onopen = () => setState("live");
     socket.onmessage = (event) => {
       try {
@@ -10612,6 +10642,7 @@ function TerminalTab({ api, alias }) {
         else if (frame.type === "exit") {
           term.writeln(`\r
 \x1B[33m[${frame.message ?? "session closed"}]\x1B[0m`);
+          setClosedReason(frame.message);
           setState("closed");
         }
       } catch {
@@ -10637,14 +10668,12 @@ function TerminalTab({ api, alias }) {
       inputSub.dispose();
       socket.close();
       term.dispose();
-      termRef.current = void 0;
-      socketRef.current = void 0;
     };
   }, [api, alias, epoch]);
   return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshsp-term-wrap", children: [
     /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshsp-term", ref: containerRef }),
     state !== "live" && /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshsp-term-overlay", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { children: state === "connecting" ? tt("common.loading") : tt("term.closed") }),
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { children: state === "connecting" ? tt("common.loading") : closedReason ?? tt("term.closed") }),
       state === "closed" && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { className: "dshsp-btn", "data-primary": "", onClick: () => setEpoch((e) => e + 1), children: tt("term.reconnect") })
     ] })
   ] });

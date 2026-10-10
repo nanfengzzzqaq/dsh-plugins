@@ -143,7 +143,12 @@ function LogsModal({ api, alias, container, onClose }: {
       setFollowing(false)
       return
     }
-    const socket = new WebSocket(api.dockerLogsFollowUrl(alias, container.id, 200))
+    const url = api.dockerLogsFollowUrl(alias, container.id, 200)
+    if (url === undefined) {
+      setText(tt('term.unavailable'))
+      return
+    }
+    const socket = new WebSocket(url)
     socketRef.current = socket
     socket.onmessage = (event) => {
       try {

@@ -123,6 +123,7 @@ export const zh = {
   'portal.remove': '移除',
   'portal.tunnel.opening': '正在建立隧道…',
   'portal.failed': '打开失败：{error}',
+  'term.unavailable': '当前页面无法建立 WebSocket 连接（请通过浏览器访问 Web GUI 使用此功能）',
 }
 
 export type ServerPanelKey = keyof typeof zh
@@ -248,4 +249,5 @@ export const en: Record<ServerPanelKey, string> = {
   'portal.remove': 'Remove',
   'portal.tunnel.opening': 'Opening tunnel…',
   'portal.failed': 'Open failed: {error}',
+  'term.unavailable': 'This page cannot open a WebSocket (use the Web GUI in a browser for this feature)',
 }

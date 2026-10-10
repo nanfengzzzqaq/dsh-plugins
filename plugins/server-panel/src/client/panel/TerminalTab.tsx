@@ -29,9 +29,8 @@ type SessionState = 'connecting' | 'live' | 'closed'
 
 export function TerminalTab({ api, alias }: TerminalTabProps): React.ReactElement {
   const containerRef = useRef<HTMLDivElement>(null)
-  const termRef = useRef<Terminal>()
-  const socketRef = useRef<WebSocket>()
   const [state, setState] = useState<SessionState>('connecting')
+  const [closedReason, setClosedReason] = useState<string>()
   const [epoch, setEpoch] = useState(0)
 
   useEffect(() => {
@@ -40,6 +39,7 @@ export function TerminalTab({ api, alias }: TerminalTabProps): React.ReactElemen
     if (!container) return
 
     setState('connecting')
+    setClosedReason(undefined)
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 13,
@@ -50,10 +50,17 @@ export function TerminalTab({ api, alias }: TerminalTabProps): React.ReactElemen
     term.loadAddon(fit)
     term.open(container)
     fit.fit()
-    termRef.current = term
 
-    const socket = new WebSocket(api.terminalUrl(alias, term.cols, term.rows))
-    socketRef.current = socket
+    const url = api.terminalUrl(alias, term.cols, term.rows)
+    if (url === undefined) {
+      // This page cannot carry a socket at all (application page without a
+      // published host authority): show the actionable reason, no spinner.
+      setClosedReason(tt('term.unavailable'))
+      setState('closed')
+      return () => term.dispose()
+    }
+
+    const socket = new WebSocket(url)
 
     socket.onopen = () => setState('live')
     socket.onmessage = (event) => {
@@ -62,6 +69,7 @@ export function TerminalTab({ api, alias }: TerminalTabProps): React.ReactElemen
         if (frame.type === 'data' && typeof frame.text === 'string') term.write(frame.text)
         else if (frame.type === 'exit') {
           term.writeln(`\r\n\x1b[33m[${frame.message ?? 'session closed'}]\x1b[0m`)
+          setClosedReason(frame.message)
           setState('closed')
         }
       } catch { /* ignore malformed frame */ }
@@ -87,8 +95,6 @@ export function TerminalTab({ api, alias }: TerminalTabProps): React.ReactElemen
       inputSub.dispose()
       socket.close()
       term.dispose()
-      termRef.current = undefined
-      socketRef.current = undefined
     }
   }, [api, alias, epoch])
 
@@ -97,7 +103,7 @@ export function TerminalTab({ api, alias }: TerminalTabProps): React.ReactElemen
       <div className="dshsp-term" ref={containerRef} />
       {state !== 'live' && (
         <div className="dshsp-term-overlay">
-          <span>{state === 'connecting' ? tt('common.loading') : tt('term.closed')}</span>
+          <span>{state === 'connecting' ? tt('common.loading') : (closedReason ?? tt('term.closed'))}</span>
           {state === 'closed' && (
             <button className="dshsp-btn" data-primary="" onClick={() => setEpoch(e => e + 1)}>{tt('term.reconnect')}</button>
           )}
