@@ -77,6 +77,12 @@ const sshServer = new SshServer({ hostKeys: [hostKeyPem] }, (client) => {
     else auth.reject()
   })
   client.on('ready', () => {
+    // Shared in-memory FS across every sftp channel of this connection —
+    // the engine opens a fresh sftp session per operation.
+    const memFiles = new Map<string, { content: Buffer; mtime: number }>([
+      ['/motd.txt', { content: Buffer.from('welcome to fake nas\nline2\n'), mtime: 1700000000 }],
+      ['/tmp/data.bin', { content: Buffer.alloc(64, 7), mtime: 1700000001 }],
+    ])
     // direct-tcpip (forwardOut) arrives at the CLIENT level, not the session.
     client.on('tcpip', (acceptTcp, _rejectTcp, info) => {
       const channel = acceptTcp()
@@ -94,6 +100,95 @@ const sshServer = new SshServer({ hostKeys: [hostKeyPem] }, (client) => {
         channel.write('fake-shell$ ')
         channel.on('data', (data: Buffer) => channel.write(data))
         channel.on('close', () => channel.end())
+      })
+      // SFTP subsystem on the shared in-memory FS.
+      session.on('sftp', (acceptSftp) => {
+        const sftp = acceptSftp()
+        const { OPEN_MODE, STATUS_CODE } = ssh2.utils.sftp
+        const files = memFiles
+        let handleSeq = 0
+        const handles = new Map<number, { path: string; flags: number; offset: number }>()
+        const attrsOf = (entry?: { content: Buffer; mtime: number }, isDir = false) => ({
+          mode: isDir ? 0o40755 : 0o100644,
+          uid: 0, gid: 0,
+          size: isDir ? 4096 : entry?.content.length ?? 0,
+          atime: entry?.mtime ?? 1700000000,
+          mtime: entry?.mtime ?? 1700000000,
+        })
+        sftp.on('OPEN', (reqid: number, path: string, flags: number, _attrs: unknown) => {
+          if (process.env.DEBUG_SFTP) console.log('[sftp] OPEN', path, 'flags=', flags)
+          if (flags & OPEN_MODE.WRITE) {
+            files.set(path, { content: Buffer.alloc(0), mtime: Math.floor(Date.now() / 1000) })
+          } else if (!files.has(path)) {
+            return sftp.status(reqid, STATUS_CODE.NO_SUCH_FILE)
+          }
+          const id = ++handleSeq
+          handles.set(id, { path, flags, offset: 0 })
+          const handle = Buffer.alloc(4)
+          handle.writeUInt32BE(id)
+          sftp.handle(reqid, handle)
+        })
+        sftp.on('READ', (reqid: number, handle: Buffer, offset: number, length: number) => {
+          const entry = handles.get(handle.readUInt32BE(0))
+          const file = entry && files.get(entry.path)
+          if (!entry || !file) return sftp.status(reqid, STATUS_CODE.NO_SUCH_FILE)
+          const data = file.content.subarray(offset, offset + length)
+          if (data.length === 0) return sftp.status(reqid, STATUS_CODE.EOF)
+          sftp.data(reqid, Buffer.from(data))
+        })
+        sftp.on('WRITE', (reqid: number, handle: Buffer, offset: number, data: Buffer) => {
+          if (process.env.DEBUG_SFTP) console.log('[sftp] WRITE', offset, data.length)
+          const entry = handles.get(handle.readUInt32BE(0))
+          if (!entry) return sftp.status(reqid, STATUS_CODE.FAILURE)
+          const file = files.get(entry.path) ?? { content: Buffer.alloc(0), mtime: 0 }
+          const next = Buffer.alloc(Math.max(file.content.length, offset + data.length))
+          file.content.copy(next)
+          data.copy(next, offset)
+          file.content = next
+          file.mtime = Math.floor(Date.now() / 1000)
+          files.set(entry.path, file)
+          sftp.status(reqid, STATUS_CODE.OK)
+        })
+        sftp.on('CLOSE', (reqid: number, handle: Buffer) => {
+          handles.delete(handle.readUInt32BE(0))
+          sftp.status(reqid, STATUS_CODE.OK)
+        })
+        const onStat = (reqid: number, path: string): void => {
+          if (path === '/') return sftp.attrs(reqid, attrsOf(undefined, true))
+          const file = files.get(path)
+          if (!file) return sftp.status(reqid, STATUS_CODE.NO_SUCH_FILE)
+          sftp.attrs(reqid, attrsOf(file))
+        }
+        sftp.on('STAT', onStat)
+        sftp.on('LSTAT', onStat)
+               sftp.on('RENAME', (reqid: number, from: string, to: string) => {
+          const file = files.get(from)
+          if (!file) return sftp.status(reqid, STATUS_CODE.NO_SUCH_FILE)
+          files.delete(from)
+          files.set(to, file)
+          sftp.status(reqid, STATUS_CODE.OK)
+        })
+        // Directory listing: OPENDIR returns a handle, READDIR streams names once.
+        sftp.on('OPENDIR', (reqid: number, path: string) => {
+          if (path !== '/') return sftp.status(reqid, STATUS_CODE.NO_SUCH_FILE)
+          const id = ++handleSeq
+          handles.set(id, { path, flags: 0, offset: 0 })
+          const handle = Buffer.alloc(4)
+          handle.writeUInt32BE(id)
+          sftp.handle(reqid, handle)
+        })
+        sftp.on('READDIR', (reqid: number, handle: Buffer) => {
+          const entry = handles.get(handle.readUInt32BE(0))
+          if (!entry) return sftp.status(reqid, STATUS_CODE.FAILURE)
+          if (entry.offset > 0) return sftp.status(reqid, STATUS_CODE.EOF)
+          entry.offset = 1
+          const list = [...files.keys()].filter(p => p.lastIndexOf('/') === 0 && p.length > 1).map(p => ({
+            filename: p.slice(1),
+            longname: `-rw-r--r-- 1 root root ${files.get(p)!.content.length}`,
+            attrs: attrsOf(files.get(p)),
+          }))
+          sftp.name(reqid, list)
+        })
       })
       session.on('exec', (acceptExec, _reject, info) => {
         const channel = acceptExec()
@@ -257,6 +352,35 @@ async function jpost(path: string, body: unknown): Promise<{ status: number; bod
     store.create({ alias: 'nas', label: 'dup', host: 'x', port: 22, username: 'u', authType: 'password', password: 'p' })
     check('duplicate alias rejected', false)
   } catch { check('duplicate alias rejected', true) }
+}
+
+// ---------------------------------------------------------- files (SFTP)
+{
+  // list
+  const { body: listBody } = await jget(API.filesList + '?alias=nas&path=/')
+  const entries = (listBody as { entries: Array<{ name: string; isDir: boolean }> }).entries
+  check('file list', entries.some(e => e.name === 'motd.txt'), entries)
+  // read
+  const { body: readBody } = await jget(API.filesRead + '?alias=nas&path=/motd.txt')
+  check('file read', (readBody as { content: string }).content.includes('welcome to fake nas'), readBody)
+  // write (via temp + rename), then read back
+  const { body: writeBody } = await jpost(API.filesWrite, { alias: 'nas', path: '/motd.txt', content: 'edited content 中文\n' })
+  check('file write accepted', (writeBody as { ok: boolean }).ok === true, writeBody)
+  const { body: rereadBody } = await jget(API.filesRead + '?alias=nas&path=/motd.txt')
+  check('file write persisted', (rereadBody as { content: string }).content === 'edited content 中文\n', rereadBody)
+  // upload (raw streamed body)
+  const uploadResponse = await fetch(`${base}${API.filesUpload}?alias=nas&path=/tmp/uploaded.log`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream' },
+    body: 'upload payload 1 2 3',
+  })
+  check('file upload accepted', uploadResponse.status === 200, uploadResponse.status)
+  const { body: uploadRead } = await jget(API.filesRead + '?alias=nas&path=/tmp/uploaded.log')
+  check('uploaded content round-trips', (uploadRead as { content: string }).content === 'upload payload 1 2 3', uploadRead)
+  // download
+  const downloadResponse = await fetch(`${base}${API.filesDownload}?alias=nas&path=/tmp/data.bin`)
+  const downloaded = Buffer.from(await downloadResponse.arrayBuffer())
+  check('file download streams bytes', downloaded.length === 64 && downloaded[0] === 7, downloaded.length)
 }
 
 // ---------------------------------------------------------- terminal (WS PTY)

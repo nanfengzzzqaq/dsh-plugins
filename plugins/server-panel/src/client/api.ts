@@ -196,6 +196,51 @@ export class ServerPanelApi {
     await post(API.filesMkdir, { alias, path })
   }
 
+  /**
+   * Upload one file into a remote directory, streaming the body. XHR is used
+   * (not fetch) for its upload progress events.
+   */
+  fileUpload(alias: string, dir: string, file: File, onProgress: (loaded: number, total: number) => void): {
+    promise: Promise<void>
+    abort: () => void
+  } {
+    const name = file.name.replace(/[/\\]/g, '_')
+    const path = (dir.endsWith('/') ? dir : dir + '/') + name
+    const xhr = new XMLHttpRequest()
+    const promise = new Promise<void>((resolve, reject) => {
+      xhr.open('POST', API.filesUpload + query({ alias, path }))
+      xhr.setRequestHeader('content-type', 'application/octet-stream')
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(event.loaded, event.total)
+      }
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve()
+        else {
+          let message = `HTTP ${xhr.status}`
+          try {
+            const body = JSON.parse(xhr.responseText) as { error?: string }
+            if (typeof body.error === 'string') message = body.error
+          } catch { /* keep default */ }
+          reject(new ServerPanelApiError(message))
+        }
+      }
+      xhr.onerror = () => reject(new ServerPanelApiError('network error'))
+      xhr.onabort = () => reject(new ServerPanelApiError('upload aborted'))
+      xhr.send(file)
+    })
+    return { promise, abort: () => xhr.abort() }
+  }
+
+  /** Read a remote text file (editor surface, capped by the host). */
+  async fileRead(alias: string, path: string): Promise<{ content: string; truncated: boolean }> {
+    return readJson(await fetch(API.filesRead + query({ alias, path })))
+  }
+
+  /** Write a remote text file. */
+  async fileWrite(alias: string, path: string, content: string): Promise<void> {
+    await post(API.filesWrite, { alias, path, content })
+  }
+
   async fileRename(alias: string, from: string, to: string): Promise<void> {
     await post(API.filesRename, { alias, from, to })
   }

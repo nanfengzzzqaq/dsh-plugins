@@ -171,6 +171,8 @@ var ServerEngine = class _ServerEngine {
   pool = /* @__PURE__ */ new Map();
   /** Serialize pool creation per alias so concurrent probes share one handshake. */
   connecting = /* @__PURE__ */ new Map();
+  /** Last /proc/stat sample per alias for CPU busy% diffs. */
+  lastCpuSample = /* @__PURE__ */ new Map();
   constructor(store) {
     this.store = store;
   }
@@ -380,6 +382,7 @@ var ServerEngine = class _ServerEngine {
     "printf '__UPTIME__\\n'; cat /proc/uptime",
     "printf '__LOAD__\\n'; cat /proc/loadavg",
     "printf '__MEM__\\n'; grep -E '^(MemTotal|MemAvailable|MemFree|Buffers|Cached):' /proc/meminfo",
+    "printf '__CPUSTAT__\\n'; head -1 /proc/stat",
     "printf '__NPROC__\\n'; grep -c ^processor /proc/cpuinfo",
     "printf '__DSM__\\n'; test -f /etc/synoinfo.conf && echo yes || echo no",
     "printf '__DF__\\n'; df -k 2>/dev/null",
@@ -443,6 +446,20 @@ var ServerEngine = class _ServerEngine {
     }
     const kind = (sections.DSM ?? "").trim() === "yes" ? "dsm" : "linux";
     if (this.store.get(alias)?.detectedKind !== kind) this.store.remember(alias, { detectedKind: kind });
+    let cpuPercent;
+    const cpuCols = (sections.CPUSTAT ?? "").trim().split(/\s+/);
+    if (cpuCols[0] === "cpu" && cpuCols.length >= 8) {
+      const values = cpuCols.slice(1).map((v) => Number.parseInt(v, 10) || 0);
+      const idle = (values[3] ?? 0) + (values[4] ?? 0);
+      const total = values.reduce((a, b) => a + b, 0);
+      const previous = this.lastCpuSample.get(alias);
+      const sample = { idle, total };
+      this.lastCpuSample.set(alias, sample);
+      if (previous && total > previous.total) {
+        const busy = 1 - (idle - previous.idle) / (total - previous.total);
+        cpuPercent = Math.max(0, Math.min(100, Math.round(busy * 1e3) / 10));
+      }
+    }
     return {
       hostname: (sections.HOSTNAME ?? "").trim(),
       kernel: (sections.KERNEL ?? "").trim(),
@@ -454,6 +471,7 @@ var ServerEngine = class _ServerEngine {
         Number.parseFloat(loadParts[2] ?? "0") || 0
       ],
       cpuCount: Number.parseInt((sections.NPROC ?? "0").trim(), 10) || 0,
+      ...cpuPercent !== void 0 ? { cpuPercent } : {},
       memTotalKb: mem.total,
       memAvailableKb: mem.available,
       disks
@@ -700,6 +718,76 @@ var ServerEngine = class _ServerEngine {
       else sftp.unlink(remotePath, done);
     }));
   }
+  /** Read a remote text file (UTF-8); content is capped for the editor. */
+  async fileRead(alias, remotePath, maxBytes) {
+    const client = await this.connection(alias);
+    const sftp = await new Promise((resolve, reject) => {
+      client.sftp((error, sftp2) => error ? reject(error) : resolve(sftp2));
+    });
+    try {
+      const stat = await new Promise((resolve, reject) => {
+        sftp.stat(remotePath, (error, stats) => {
+          if (error) reject(error);
+          else resolve({ size: stats.size, isDir: stats.isDirectory() });
+        });
+      });
+      if (stat.isDir) throw new Error("cannot read a directory");
+      const readSize = Math.min(stat.size, maxBytes);
+      const chunks = [];
+      await new Promise((resolve, reject) => {
+        const stream = sftp.createReadStream(remotePath, readSize > 0 ? { start: 0, end: readSize - 1 } : {});
+        stream.on("data", (chunk) => chunks.push(chunk));
+        stream.on("error", reject);
+        stream.on("close", resolve);
+      });
+      return { content: Buffer.concat(chunks).toString("utf8"), truncated: stat.size > maxBytes };
+    } finally {
+      try {
+        sftp.end();
+      } catch {
+      }
+    }
+  }
+  /** Write a remote text file (UTF-8) atomically-ish (write to temp, rename). */
+  async fileWrite(alias, remotePath, content) {
+    return this.withSftp(alias, (sftp) => new Promise((resolve, reject) => {
+      const tmp = `${remotePath}.dsh-sp-tmp`;
+      sftp.writeFile(tmp, Buffer.from(content, "utf8"), (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        sftp.rename(tmp, remotePath, (renameError) => renameError ? reject(renameError) : resolve());
+      });
+    }));
+  }
+  /**
+   * Stream an upload into a remote path: the HTTP request body is piped
+   * straight into the SFTP write stream (no staging on the DSH host).
+   */
+  async fileUploadStream(alias, remotePath, source) {
+    const client = await this.connection(alias);
+    const sftp = await new Promise((resolve, reject) => {
+      client.sftp((error, sftp2) => error ? reject(error) : resolve(sftp2));
+    });
+    try {
+      await new Promise((resolve, reject) => {
+        const sink = sftp.createWriteStream(remotePath);
+        sink.on("error", reject);
+        sink.on("close", resolve);
+        source.on("error", (error) => {
+          sink.destroy();
+          reject(error);
+        });
+        source.pipe(sink);
+      });
+    } finally {
+      try {
+        sftp.end();
+      } catch {
+      }
+    }
+  }
   // ------------------------------------------------------------- terminal
   /**
    * Open an interactive PTY shell on the host. The caller owns the channel:
@@ -841,6 +929,9 @@ var API = {
   filesMkdir: "/api/dsh-server-panel/files/mkdir",
   filesRename: "/api/dsh-server-panel/files/rename",
   filesDelete: "/api/dsh-server-panel/files/delete",
+  filesUpload: "/api/dsh-server-panel/files/upload",
+  filesRead: "/api/dsh-server-panel/files/read",
+  filesWrite: "/api/dsh-server-panel/files/write",
   /** WebSocket upgrade path for streaming docker logs. */
   dockerLogsFollow: "/api/dsh-server-panel/docker/logs-follow",
   /** WebSocket upgrade path for the interactive PTY terminal. */
@@ -850,7 +941,7 @@ var API = {
 };
 
 // src/http.ts
-var MAX_JSON_BODY_BYTES = 2 * 1024 * 1024;
+var MAX_JSON_BODY_BYTES = 8 * 1024 * 1024;
 function readJsonBody(req) {
   return new Promise((resolve) => {
     const chunks = [];
@@ -928,6 +1019,8 @@ function requiredParam(url, name2) {
   if (value === void 0 || value === "") throw new Error(`${name2} query parameter is required`);
   return value;
 }
+var MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+var MAX_EDIT_BYTES = 1024 * 1024;
 function makeRoutes(deps) {
   const { store, engine } = deps;
   const fence = (req, res) => {
@@ -1264,6 +1357,72 @@ function makeRoutes(deps) {
         }
         try {
           await engine.fileDelete(String(body.alias), String(body.path), body.isDir === true, body.recursive === true);
+          writeJson(res, 200, { ok: true });
+        } catch (error) {
+          writeJson(res, 502, { error: errorMessage(error) });
+        }
+      }
+    },
+    {
+      // Raw body streamed straight into the SFTP write stream.
+      kind: "exact",
+      path: API.filesUpload,
+      handler: async (req, res) => {
+        if (!fence(req, res)) return;
+        if (req.method !== "POST") {
+          writeJson(res, 405, { error: "method not allowed" });
+          return;
+        }
+        const url = new URL(req.url ?? "/", "http://localhost");
+        try {
+          const alias = requiredParam(url, "alias");
+          const remotePath = requiredParam(url, "path");
+          if (remotePath.endsWith("/")) throw new Error("path must name a file, not a directory");
+          const declared = Number(req.headers["content-length"] ?? 0);
+          if (declared > MAX_UPLOAD_BYTES) throw new Error("file too large");
+          await engine.fileUploadStream(alias, remotePath, req);
+          writeJson(res, 200, { ok: true });
+        } catch (error) {
+          writeJson(res, 502, { error: errorMessage(error) });
+        }
+      }
+    },
+    {
+      kind: "exact",
+      path: API.filesRead,
+      handler: async (req, res) => {
+        if (!fence(req, res)) return;
+        if (req.method !== "GET") {
+          writeJson(res, 405, { error: "method not allowed" });
+          return;
+        }
+        const url = new URL(req.url ?? "/", "http://localhost");
+        try {
+          const result = await engine.fileRead(requiredParam(url, "alias"), requiredParam(url, "path"), MAX_EDIT_BYTES);
+          writeJson(res, 200, result);
+        } catch (error) {
+          writeJson(res, 502, { error: errorMessage(error) });
+        }
+      }
+    },
+    {
+      kind: "exact",
+      path: API.filesWrite,
+      handler: async (req, res) => {
+        if (!fence(req, res)) return;
+        if (req.method !== "POST") {
+          writeJson(res, 405, { error: "method not allowed" });
+          return;
+        }
+        const body = await readJsonBody(req);
+        if (body === null) {
+          writeJson(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        try {
+          const content = body.content;
+          if (typeof content !== "string" || Buffer.byteLength(content) > MAX_EDIT_BYTES) throw new Error("content too large");
+          await engine.fileWrite(String(body.alias), String(body.path), content);
           writeJson(res, 200, { ok: true });
         } catch (error) {
           writeJson(res, 502, { error: errorMessage(error) });

@@ -1,6 +1,8 @@
 /**
- * Panel root: host list column on the left, selected-host detail (tabs) on
- * the right. Owns the hosts list state and the add/edit/delete dialog.
+ * Panel root: host list column on the left; the right side is the live
+ * dashboard until a host is selected, then the host detail (tabs) with a
+ * back-to-dashboard affordance. Owns the hosts list state and the
+ * add/edit/delete dialog.
  */
 
 import { useCallback, useEffect, useState } from 'react'
@@ -11,6 +13,7 @@ import { OverviewTab } from './OverviewTab.tsx'
 import { DockerTab } from './DockerTab.tsx'
 import { FilesTab } from './FilesTab.tsx'
 import { TerminalTab } from './TerminalTab.tsx'
+import { Dashboard } from './Dashboard.tsx'
 
 type Tab = 'terminal' | 'overview' | 'docker' | 'files'
 
@@ -34,10 +37,7 @@ export function App({ api }: AppProps): React.ReactElement {
       const list = await api.listHosts()
       setHosts(list)
       setLoadError(undefined)
-      setSelectedAlias(prev => {
-        if (keepSelection && prev && list.some(h => h.alias === prev)) return prev
-        return list[0]?.alias
-      })
+      setSelectedAlias(prev => (keepSelection && prev && list.some(h => h.alias === prev)) ? prev : undefined)
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : String(error))
     }
@@ -52,6 +52,11 @@ export function App({ api }: AppProps): React.ReactElement {
   }, [api])
 
   const selected = hosts.find(h => h.alias === selectedAlias)
+
+  const openHost = (alias: string): void => {
+    setSelectedAlias(alias)
+    setTab('terminal')
+  }
 
   const onDelete = async (host: HostSummary): Promise<void> => {
     if (!window.confirm(tt('hosts.delete.confirm', { label: host.label }))) return
@@ -74,7 +79,9 @@ export function App({ api }: AppProps): React.ReactElement {
   return (
     <div className="dshsp-view" data-dsh-server-panel-view="">
       <div className="dshsp-header">
-        <h2 className="dshsp-title">{tt('panel.title')}</h2>
+        <h2 className="dshsp-title">{selected ? (
+          <button className="dshsp-backbtn" onClick={() => setSelectedAlias(undefined)} title={tt('dash.back')}>← {tt('dash.title')}</button>
+        ) : tt('panel.title')}</h2>
         <button className="dshsp-btn" data-primary="" onClick={() => setDialog({ mode: 'add' })}>{tt('hosts.add')}</button>
         <button className="dshsp-btn" onClick={() => void reload()}>{tt('common.refresh')}</button>
       </div>
@@ -92,7 +99,7 @@ export function App({ api }: AppProps): React.ReactElement {
               key={host.alias}
               className="dshsp-hostcard"
               data-active={host.alias === selectedAlias ? '' : undefined}
-              onClick={() => setSelectedAlias(host.alias)}
+              onClick={() => openHost(host.alias)}
             >
               <span className="dshsp-hostcard-top">
                 <span className="dshsp-dot" data-status={probes[host.alias] ?? 'unknown'} />
@@ -131,6 +138,8 @@ export function App({ api }: AppProps): React.ReactElement {
                 {tab === 'files' && <FilesTab api={api} alias={selected.alias} />}
               </div>
             </>
+          ) : hosts.length > 0 ? (
+            <Dashboard api={api} hosts={hosts} onOpenHost={openHost} />
           ) : (
             <div className="dshsp-empty">{tt('hosts.empty')}</div>
           )}

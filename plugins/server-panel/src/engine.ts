@@ -67,6 +67,8 @@ export class ServerEngine {
   private readonly pool = new Map<string, PoolEntry>()
   /** Serialize pool creation per alias so concurrent probes share one handshake. */
   private readonly connecting = new Map<string, Promise<SshClient>>()
+  /** Last /proc/stat sample per alias for CPU busy% diffs. */
+  private readonly lastCpuSample = new Map<string, { idle: number; total: number }>()
 
   constructor(store: HostStore) {
     this.store = store
@@ -270,6 +272,7 @@ export class ServerEngine {
     "printf '__UPTIME__\\n'; cat /proc/uptime",
     "printf '__LOAD__\\n'; cat /proc/loadavg",
     "printf '__MEM__\\n'; grep -E '^(MemTotal|MemAvailable|MemFree|Buffers|Cached):' /proc/meminfo",
+    "printf '__CPUSTAT__\\n'; head -1 /proc/stat",
     "printf '__NPROC__\\n'; grep -c ^processor /proc/cpuinfo",
     "printf '__DSM__\\n'; test -f /etc/synoinfo.conf && echo yes || echo no",
     "printf '__DF__\\n'; df -k 2>/dev/null",
@@ -335,6 +338,21 @@ export class ServerEngine {
     }
     const kind = (sections.DSM ?? '').trim() === 'yes' ? 'dsm' : 'linux'
     if (this.store.get(alias)?.detectedKind !== kind) this.store.remember(alias, { detectedKind: kind })
+    // Real CPU busy% from the /proc/stat jiffies diff against the last sample.
+    let cpuPercent: number | undefined
+    const cpuCols = (sections.CPUSTAT ?? '').trim().split(/\s+/)
+    if (cpuCols[0] === 'cpu' && cpuCols.length >= 8) {
+      const values = cpuCols.slice(1).map(v => Number.parseInt(v, 10) || 0)
+      const idle = (values[3] ?? 0) + (values[4] ?? 0) // idle + iowait
+      const total = values.reduce((a, b) => a + b, 0)
+      const previous = this.lastCpuSample.get(alias)
+      const sample = { idle, total }
+      this.lastCpuSample.set(alias, sample)
+      if (previous && total > previous.total) {
+        const busy = 1 - (idle - previous.idle) / (total - previous.total)
+        cpuPercent = Math.max(0, Math.min(100, Math.round(busy * 1000) / 10))
+      }
+    }
     return {
       hostname: (sections.HOSTNAME ?? '').trim(),
       kernel: (sections.KERNEL ?? '').trim(),
@@ -346,6 +364,7 @@ export class ServerEngine {
         Number.parseFloat(loadParts[2] ?? '0') || 0,
       ],
       cpuCount: Number.parseInt((sections.NPROC ?? '0').trim(), 10) || 0,
+      ...(cpuPercent !== undefined ? { cpuPercent } : {}),
       memTotalKb: mem.total,
       memAvailableKb: mem.available,
       disks,
@@ -595,6 +614,67 @@ export class ServerEngine {
       if (isDir) sftp.rmdir(remotePath, done)
       else sftp.unlink(remotePath, done)
     }))
+  }
+
+  /** Read a remote text file (UTF-8); content is capped for the editor. */
+  async fileRead(alias: string, remotePath: string, maxBytes: number): Promise<{ content: string; truncated: boolean }> {
+    const client = await this.connection(alias)
+    const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
+      client.sftp((error, sftp) => error ? reject(error) : resolve(sftp))
+    })
+    try {
+      const stat = await new Promise<{ size: number; isDir: boolean }>((resolve, reject) => {
+        sftp.stat(remotePath, (error, stats) => {
+          if (error) reject(error)
+          else resolve({ size: stats.size, isDir: stats.isDirectory() })
+        })
+      })
+      if (stat.isDir) throw new Error('cannot read a directory')
+      const readSize = Math.min(stat.size, maxBytes)
+      const chunks: Buffer[] = []
+      await new Promise<void>((resolve, reject) => {
+        const stream = sftp.createReadStream(remotePath, readSize > 0 ? { start: 0, end: readSize - 1 } : {})
+        stream.on('data', (chunk: Buffer) => chunks.push(chunk))
+        stream.on('error', reject)
+        stream.on('close', resolve)
+      })
+      return { content: Buffer.concat(chunks).toString('utf8'), truncated: stat.size > maxBytes }
+    } finally {
+      try { sftp.end() } catch { /* ignore */ }
+    }
+  }
+
+  /** Write a remote text file (UTF-8) atomically-ish (write to temp, rename). */
+  async fileWrite(alias: string, remotePath: string, content: string): Promise<void> {
+    return this.withSftp(alias, (sftp) => new Promise((resolve, reject) => {
+      const tmp = `${remotePath}.dsh-sp-tmp`
+      sftp.writeFile(tmp, Buffer.from(content, 'utf8'), (error) => {
+        if (error) { reject(error); return }
+        sftp.rename(tmp, remotePath, (renameError) => renameError ? reject(renameError) : resolve())
+      })
+    }))
+  }
+
+  /**
+   * Stream an upload into a remote path: the HTTP request body is piped
+   * straight into the SFTP write stream (no staging on the DSH host).
+   */
+  async fileUploadStream(alias: string, remotePath: string, source: NodeJS.ReadableStream): Promise<void> {
+    const client = await this.connection(alias)
+    const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
+      client.sftp((error, sftp) => error ? reject(error) : resolve(sftp))
+    })
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const sink = sftp.createWriteStream(remotePath)
+        sink.on('error', reject)
+        sink.on('close', resolve)
+        source.on('error', (error) => { sink.destroy(); reject(error) })
+        ;(source as NodeJS.ReadableStream).pipe(sink)
+      })
+    } finally {
+      try { sftp.end() } catch { /* ignore */ }
+    }
   }
 
   // ------------------------------------------------------------- terminal

@@ -18,6 +18,9 @@ export const API = {
   filesMkdir: '/api/dsh-server-panel/files/mkdir',
   filesRename: '/api/dsh-server-panel/files/rename',
   filesDelete: '/api/dsh-server-panel/files/delete',
+  filesUpload: '/api/dsh-server-panel/files/upload',
+  filesRead: '/api/dsh-server-panel/files/read',
+  filesWrite: '/api/dsh-server-panel/files/write',
   /** WebSocket upgrade path for streaming docker logs. */
   dockerLogsFollow: '/api/dsh-server-panel/docker/logs-follow',
   /** WebSocket upgrade path for the interactive PTY terminal. */
@@ -111,6 +114,8 @@ export interface HostStatus {
   uptimeSeconds: number
   loadAvg: [number, number, number]
   cpuCount: number
+  /** Real CPU busy percentage from a /proc/stat diff; absent on first sample. */
+  cpuPercent?: number
   memTotalKb: number
   memAvailableKb: number
   disks: DiskInfo[]

@@ -45,6 +45,9 @@ var API = {
   filesMkdir: "/api/dsh-server-panel/files/mkdir",
   filesRename: "/api/dsh-server-panel/files/rename",
   filesDelete: "/api/dsh-server-panel/files/delete",
+  filesUpload: "/api/dsh-server-panel/files/upload",
+  filesRead: "/api/dsh-server-panel/files/read",
+  filesWrite: "/api/dsh-server-panel/files/write",
   /** WebSocket upgrade path for streaming docker logs. */
   dockerLogsFollow: "/api/dsh-server-panel/docker/logs-follow",
   /** WebSocket upgrade path for the interactive PTY terminal. */
@@ -175,7 +178,18 @@ var zh = {
   "portal.remove": "\u79FB\u9664",
   "portal.tunnel.opening": "\u6B63\u5728\u5EFA\u7ACB\u96A7\u9053\u2026",
   "portal.failed": "\u6253\u5F00\u5931\u8D25\uFF1A{error}",
-  "term.unavailable": "\u5F53\u524D\u9875\u9762\u65E0\u6CD5\u5EFA\u7ACB WebSocket \u8FDE\u63A5\uFF08\u8BF7\u901A\u8FC7\u6D4F\u89C8\u5668\u8BBF\u95EE Web GUI \u4F7F\u7528\u6B64\u529F\u80FD\uFF09"
+  "term.unavailable": "\u5F53\u524D\u9875\u9762\u65E0\u6CD5\u5EFA\u7ACB WebSocket \u8FDE\u63A5\uFF08\u8BF7\u901A\u8FC7\u6D4F\u89C8\u5668\u8BBF\u95EE Web GUI \u4F7F\u7528\u6B64\u529F\u80FD\uFF09",
+  "dash.title": "\u603B\u89C8",
+  "dash.back": "\u8FD4\u56DE\u603B\u89C8",
+  "files.upload": "\u4E0A\u4F20",
+  "files.edit": "\u7F16\u8F91",
+  "files.drop.hint": "\u53EF\u62D6\u62FD\u6587\u4EF6\u5230\u6B64\u4E0A\u4F20",
+  "files.drop.overlay": "\u677E\u5F00\u4EE5\u4E0A\u4F20\u5230\u5F53\u524D\u76EE\u5F55",
+  "editor.save": "\u4FDD\u5B58",
+  "editor.saving": "\u4FDD\u5B58\u4E2D\u2026",
+  "editor.dirty": "\u25CF \u672A\u4FDD\u5B58",
+  "editor.unsaved": "\u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u5173\u95ED\u5417\uFF1F",
+  "editor.truncated": "\u6587\u4EF6\u8D85\u8FC7 1MB\uFF0C\u4EC5\u663E\u793A\u524D 1MB\uFF08\u53EA\u8BFB\uFF09"
 };
 var en = {
   "entry.label": "Servers",
@@ -298,7 +312,18 @@ var en = {
   "portal.remove": "Remove",
   "portal.tunnel.opening": "Opening tunnel\u2026",
   "portal.failed": "Open failed: {error}",
-  "term.unavailable": "This page cannot open a WebSocket (use the Web GUI in a browser for this feature)"
+  "term.unavailable": "This page cannot open a WebSocket (use the Web GUI in a browser for this feature)",
+  "dash.title": "Dashboard",
+  "dash.back": "Back to dashboard",
+  "files.upload": "Upload",
+  "files.edit": "Edit",
+  "files.drop.hint": "drop files here to upload",
+  "files.drop.overlay": "Release to upload to this directory",
+  "editor.save": "Save",
+  "editor.saving": "Saving\u2026",
+  "editor.dirty": "\u25CF unsaved",
+  "editor.unsaved": "Close with unsaved changes?",
+  "editor.truncated": "File exceeds 1 MB; showing the first 1 MB (read-only)"
 };
 
 // src/client/i18n.ts
@@ -469,6 +494,46 @@ var ServerPanelApi = class {
   async fileMkdir(alias, path) {
     await post(API.filesMkdir, { alias, path });
   }
+  /**
+   * Upload one file into a remote directory, streaming the body. XHR is used
+   * (not fetch) for its upload progress events.
+   */
+  fileUpload(alias, dir, file, onProgress) {
+    const name = file.name.replace(/[/\\]/g, "_");
+    const path = (dir.endsWith("/") ? dir : dir + "/") + name;
+    const xhr = new XMLHttpRequest();
+    const promise = new Promise((resolve, reject) => {
+      xhr.open("POST", API.filesUpload + query({ alias, path }));
+      xhr.setRequestHeader("content-type", "application/octet-stream");
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(event.loaded, event.total);
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else {
+          let message = `HTTP ${xhr.status}`;
+          try {
+            const body = JSON.parse(xhr.responseText);
+            if (typeof body.error === "string") message = body.error;
+          } catch {
+          }
+          reject(new ServerPanelApiError(message));
+        }
+      };
+      xhr.onerror = () => reject(new ServerPanelApiError("network error"));
+      xhr.onabort = () => reject(new ServerPanelApiError("upload aborted"));
+      xhr.send(file);
+    });
+    return { promise, abort: () => xhr.abort() };
+  }
+  /** Read a remote text file (editor surface, capped by the host). */
+  async fileRead(alias, path) {
+    return readJson(await fetch(API.filesRead + query({ alias, path })));
+  }
+  /** Write a remote text file. */
+  async fileWrite(alias, path, content) {
+    await post(API.filesWrite, { alias, path, content });
+  }
   async fileRename(alias, from, to) {
     await post(API.filesRename, { alias, from, to });
   }
@@ -503,21 +568,26 @@ var PANEL_CSS = `
 .dshsp-view { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
   background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary);
   font-family: var(--dsw-font-family); }
-.dshsp-header { flex: none; display: flex; align-items: center; gap: 10px; padding: 14px 16px 10px; }
+.dshsp-header { flex: none; display: flex; align-items: center; gap: 10px; padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1); }
 .dshsp-title { flex: 1; margin: 0; font-size: 16px; font-weight: 700; white-space: nowrap; }
 .dshsp-body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
-.dshsp-hosts { flex: none; width: 240px; border-right: 1px solid var(--dsw-alias-border-l1);
-  display: flex; flex-direction: column; overflow-y: auto; padding: 10px; gap: 8px; }
-.dshsp-hostcard { text-align: left; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px;
+.dshsp-hosts { flex: none; width: 252px; border-right: 1px solid var(--dsw-alias-border-l1);
+  display: flex; flex-direction: column; overflow-y: auto; padding: 12px; gap: 8px; }
+.dshsp-hostcard { text-align: left; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px;
   background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); cursor: pointer;
-  padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; font: inherit; width: 100%; }
-.dshsp-hostcard:hover { background: var(--dsw-alias-interactive-bg-hover); }
-.dshsp-hostcard[data-active] { border-color: var(--dsw-alias-state-business-primary); }
+  padding: 11px 13px; display: flex; flex-direction: column; gap: 4px; font: inherit; width: 100%;
+  transition: border-color .15s, box-shadow .15s; }
+.dshsp-hostcard:hover { border-color: var(--dsw-alias-border-l1); box-shadow: var(--dsw-shadow-lv1, 0 1px 4px rgba(0,0,0,.06)); }
+.dshsp-hostcard[data-active] { border-color: var(--dsw-alias-state-business-primary);
+  box-shadow: inset 2px 0 0 var(--dsw-alias-state-business-primary); }
 .dshsp-hostcard-top { display: flex; align-items: center; gap: 8px; }
 .dshsp-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--dsw-alias-label-tertiary); }
-.dshsp-dot[data-status=ok] { background: var(--dsw-alias-state-success-primary); }
+.dshsp-dot[data-status=ok] { background: var(--dsw-alias-state-success-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-success-primary) 22%, transparent); }
 .dshsp-dot[data-status=fail] { background: var(--dsw-alias-state-error-primary); }
-.dshsp-dot[data-status=testing] { background: var(--dsw-alias-state-warn-primary); }
+.dshsp-dot[data-status=testing] { background: var(--dsw-alias-state-warn-primary); animation: dshsp-pulse 1.2s ease-in-out infinite; }
+@keyframes dshsp-pulse { 50% { opacity: .35; } }
 .dshsp-hostname { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .dshsp-hostaddr { color: var(--dsw-alias-label-tertiary); font-size: 11.5px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -610,6 +680,59 @@ var PANEL_CSS = `
   color: #d3e1f5; font-size: 13px; }
 .dshsp-btn[data-portal] { color: var(--dsw-alias-state-business-primary);
   border-color: var(--dsw-alias-state-business-primary); }
+/* ---------------------------------------------------------------- dashboard */
+.dshsp-dash { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; align-content: start; }
+.dshsp-dashcard { text-align: left; border: 1px solid var(--dsw-alias-border-l2); border-radius: 14px;
+  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); cursor: pointer;
+  padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; font: inherit;
+  transition: border-color .15s, box-shadow .15s, transform .15s; }
+.dshsp-dashcard:hover { border-color: var(--dsw-alias-state-business-primary);
+  box-shadow: var(--dsw-shadow-lv2, 0 2px 10px rgba(0,0,0,.08)); transform: translateY(-1px); }
+.dshsp-dashcard[data-hot] { border-color: var(--dsw-alias-state-error-primary); }
+.dshsp-dashcard[data-offline] { opacity: .62; }
+.dshsp-dashcard[data-offline]:hover { border-color: var(--dsw-alias-state-error-primary); }
+.dshsp-dashcard-head { display: flex; align-items: center; gap: 8px; }
+.dshsp-dashcard-name { font-size: 14px; font-weight: 700; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshsp-dashcard-addr { color: var(--dsw-alias-label-tertiary); font-size: 11.5px; }
+.dshsp-dashcard-gauges { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+.dshsp-gauge { display: flex; flex-direction: column; gap: 4px; }
+.dshsp-dashcard-meta { display: flex; justify-content: space-between; color: var(--dsw-alias-label-tertiary); font-size: 11.5px; }
+.dshsp-dashcard-disks { display: flex; flex-direction: column; gap: 5px; border-top: 1px solid var(--dsw-alias-separator-primary); padding-top: 8px; }
+.dshsp-dashcard-offline { display: flex; flex-direction: column; gap: 4px; padding: 10px 0;
+  color: var(--dsw-alias-state-error-primary); font-size: 12.5px; }
+.dshsp-meter-row { display: flex; align-items: center; gap: 8px; }
+.dshsp-meter-label { flex: none; min-width: 34px; max-width: 110px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--dsw-alias-label-tertiary); font-size: 11px; }
+.dshsp-meter-row .dshsp-meter { flex: 1; }
+.dshsp-meter-value { flex: none; min-width: 38px; text-align: right; color: var(--dsw-alias-label-secondary);
+  font-size: 11px; font-variant-numeric: tabular-nums; }
+.dshsp-meter-fill[data-warm] { background: var(--dsw-alias-state-warn-primary); }
+.dshsp-spark { width: 100%; height: 24px; }
+.dshsp-spark path { stroke: var(--dsw-alias-state-business-primary); }
+.dshsp-spark[data-hot] path { stroke: var(--dsw-alias-state-error-primary); }
+.dshsp-backbtn { border: none; background: none; cursor: pointer; color: var(--dsw-alias-state-business-primary);
+  font: inherit; font-size: 15px; font-weight: 700; padding: 0; }
+.dshsp-backbtn:hover { text-decoration: underline; }
+/* ---------------------------------------------------------------- uploads/editor */
+.dshsp-files-root { position: relative; display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
+.dshsp-uploads { display: flex; flex-direction: column; gap: 6px; }
+.dshsp-upload { display: flex; align-items: center; gap: 10px; border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px; padding: 6px 10px; background: var(--dsw-alias-bg-layer-2); }
+.dshsp-upload[data-error] { border-color: var(--dsw-alias-state-error-primary); }
+.dshsp-upload-name { font-size: 12px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshsp-drop-overlay { position: absolute; inset: 0; z-index: 5; border: 2px dashed var(--dsw-alias-state-business-primary);
+  border-radius: 12px; background: var(--dsw-alias-bg-mask-1); display: flex; align-items: center; justify-content: center;
+  color: var(--dsw-alias-state-business-primary); font-size: 15px; font-weight: 600; pointer-events: none; }
+.dshsp-filename[data-editable] { cursor: pointer; }
+.dshsp-filename[data-editable]:hover { color: var(--dsw-alias-state-business-primary); text-decoration: underline; }
+.dshsp-editor { height: min(760px, calc(100vh - 96px)); }
+.dshsp-editor-area { flex: 1; min-height: 320px; resize: none; outline: none;
+  background: var(--dsw-specific-input-major); color: var(--dsw-alias-label-primary);
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; padding: 12px 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.6;
+  tab-size: 2; white-space: pre; overflow: auto; }
+.dshsp-editor-area:focus { border-color: var(--dsw-alias-state-business-primary); }
 `;
 function installStyles() {
   const tag = document.createElement("style");
@@ -620,7 +743,7 @@ function installStyles() {
 }
 
 // src/client/panel/App.tsx
-var import_react6 = require("react");
+var import_react8 = require("react");
 
 // src/client/panel/HostForm.tsx
 var import_react = require("react");
@@ -853,7 +976,7 @@ function OverviewTab({ api, alias }) {
   }
   if (!status) return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshsp-empty" });
   const memUsed = status.memTotalKb - status.memAvailableKb;
-  const memPercent = status.memTotalKb > 0 ? Math.round(memUsed / status.memTotalKb * 100) : 0;
+  const memPercent2 = status.memTotalKb > 0 ? Math.round(memUsed / status.memTotalKb * 100) : 0;
   return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
     /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshsp-toolbar", children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("button", { className: "dshsp-btn", onClick: () => void refresh(), children: tt("common.refresh") }) }),
     /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("dl", { className: "dshsp-kv", children: [
@@ -871,8 +994,8 @@ function OverviewTab({ api, alias }) {
       /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { className: "dshsp-mono", children: status.loadAvg.map((v2) => v2.toFixed(2)).join("  ") }),
       /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dt", { children: tt("overview.mem") }),
       /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("dd", { children: /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)("div", { style: { display: "flex", alignItems: "center", gap: 10 }, children: [
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshsp-meter", style: { flex: "0 140px" }, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshsp-meter-fill", "data-hot": memPercent >= 90 ? "" : void 0, style: { width: `${memPercent}%` } }) }),
-        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: tt("overview.mem.format", { used: formatBytes(memUsed), total: formatBytes(status.memTotalKb), percent: memPercent }) })
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshsp-meter", style: { flex: "0 140px" }, children: /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshsp-meter-fill", "data-hot": memPercent2 >= 90 ? "" : void 0, style: { width: `${memPercent2}%` } }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: tt("overview.mem.format", { used: formatBytes(memUsed), total: formatBytes(status.memTotalKb), percent: memPercent2 }) })
       ] }) })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("div", { className: "dshsp-field-label", children: tt("overview.disks") }),
@@ -1039,8 +1162,92 @@ function LogsModal({ api, alias, container, onClose }) {
 }
 
 // src/client/panel/FilesTab.tsx
+var import_react5 = require("react");
+
+// src/client/panel/EditorModal.tsx
 var import_react4 = require("react");
 var import_jsx_runtime4 = require("react/jsx-runtime");
+function EditorModal({ api, alias, path, onClose }) {
+  const [content, setContent] = (0, import_react4.useState)();
+  const [original, setOriginal] = (0, import_react4.useState)("");
+  const [truncated, setTruncated] = (0, import_react4.useState)(false);
+  const [error, setError] = (0, import_react4.useState)();
+  const [saving, setSaving] = (0, import_react4.useState)(false);
+  const areaRef = (0, import_react4.useRef)(null);
+  (0, import_react4.useEffect)(() => {
+    let cancelled = false;
+    api.fileRead(alias, path).then((result) => {
+      if (cancelled) return;
+      setContent(result.content);
+      setOriginal(result.content);
+      setTruncated(result.truncated);
+    }).catch((readError) => {
+      if (!cancelled) setError(String(readError instanceof Error ? readError.message : readError));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, alias, path]);
+  const dirty = content !== void 0 && content !== original;
+  const save = async () => {
+    if (content === void 0 || truncated) return;
+    setSaving(true);
+    setError(void 0);
+    try {
+      await api.fileWrite(alias, path, content);
+      setOriginal(content);
+      onClose(true);
+    } catch (saveError) {
+      setError(String(saveError instanceof Error ? saveError.message : saveError));
+      setSaving(false);
+    }
+  };
+  const close = () => {
+    if (dirty && !window.confirm(tt("editor.unsaved"))) return;
+    onClose(false);
+  };
+  const name = path.split("/").pop() ?? path;
+  return /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "dshsp-modal-backdrop", onClick: close, children: /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "dshsp-modal dshsp-modal-lg dshsp-editor", onClick: (e) => e.stopPropagation(), children: [
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("h3", { className: "dshsp-modal-title dshsp-mono", children: name }),
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "dshsp-hint dshsp-mono", style: { overflowWrap: "anywhere" }, children: path }),
+    truncated && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "dshsp-banner", "data-kind": "info", children: tt("editor.truncated") }),
+    error && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "dshsp-banner", "data-kind": "error", children: error }),
+    content === void 0 && !error ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "dshsp-loading", children: tt("common.loading") }) : /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+      "textarea",
+      {
+        ref: areaRef,
+        className: "dshsp-editor-area",
+        value: content,
+        readOnly: truncated,
+        spellCheck: false,
+        onChange: (e) => setContent(e.target.value),
+        onKeyDown: (e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+            e.preventDefault();
+            void save();
+          } else if (e.key === "Tab") {
+            e.preventDefault();
+            const area = e.currentTarget;
+            const { selectionStart, selectionEnd, value } = area;
+            const next = value.slice(0, selectionStart) + "  " + value.slice(selectionEnd);
+            setContent(next);
+            requestAnimationFrame(() => {
+              area.selectionStart = area.selectionEnd = selectionStart + 2;
+            });
+          }
+        }
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "dshsp-modal-footer", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "dshsp-hint", style: { marginRight: "auto" }, children: dirty ? tt("editor.dirty") : "" }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "dshsp-btn", onClick: close, children: tt("common.cancel") }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "dshsp-btn", "data-primary": "", disabled: !dirty || saving || truncated, onClick: () => void save(), children: saving ? tt("editor.saving") : tt("editor.save") })
+    ] })
+  ] }) });
+}
+
+// src/client/panel/FilesTab.tsx
+var import_jsx_runtime5 = require("react/jsx-runtime");
 function joinPath(base, name) {
   return (base.endsWith("/") ? base : base + "/") + name;
 }
@@ -1051,15 +1258,26 @@ function parentPath(path) {
 }
 function formatMtime(mtimeSeconds) {
   if (!mtimeSeconds) return "-";
-  const date = new Date(mtimeSeconds * 1e3);
-  return date.toLocaleString();
+  return new Date(mtimeSeconds * 1e3).toLocaleString();
+}
+var TEXT_EXT = /\.(txt|md|log|conf|cfg|ini|yaml|yml|json|xml|sh|bash|zsh|env|properties|toml|csv|ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|c|h|cpp|hpp|css|scss|html|htm|sql|vue|svelte|dockerfile|containerfile|gitignore|gitattributes|editorconfig|htaccess|nginx|service|timer|cron|crontab|fstab|hosts|rules|list|sources)$/i;
+var TEXT_NAMES = /^(docker-compose\.ya?ml|compose\.ya?ml|dockerfile|makefile|justfile|\.env(\..*)?|\.gitignore|\.dockerignore|\.npmrc|\.bashrc|\.zshrc|\.profile|authorized_keys|config)$/i;
+function isTextLike(entry) {
+  if (entry.isDir) return false;
+  if (entry.size > 1024 * 1024) return false;
+  return TEXT_EXT.test(entry.name) || TEXT_NAMES.test(entry.name);
 }
 function FilesTab({ api, alias }) {
-  const [path, setPath] = (0, import_react4.useState)("/");
-  const [entries, setEntries] = (0, import_react4.useState)();
-  const [error, setError] = (0, import_react4.useState)();
-  const [busy, setBusy] = (0, import_react4.useState)(false);
-  const refresh = (0, import_react4.useCallback)(async (target) => {
+  const [path, setPath] = (0, import_react5.useState)("/");
+  const [entries, setEntries] = (0, import_react5.useState)();
+  const [error, setError] = (0, import_react5.useState)();
+  const [busy, setBusy] = (0, import_react5.useState)(false);
+  const [dragging, setDragging] = (0, import_react5.useState)(false);
+  const [uploads, setUploads] = (0, import_react5.useState)([]);
+  const [editing, setEditing] = (0, import_react5.useState)();
+  const fileInputRef = (0, import_react5.useRef)(null);
+  const uploadSeq = (0, import_react5.useRef)(0);
+  const refresh = (0, import_react5.useCallback)(async (target) => {
     setBusy(true);
     try {
       const list = await api.fileList(alias, target);
@@ -1072,16 +1290,40 @@ function FilesTab({ api, alias }) {
       setBusy(false);
     }
   }, [api, alias]);
-  (0, import_react4.useEffect)(() => {
+  (0, import_react5.useEffect)(() => {
     setPath("/");
     setEntries(void 0);
     setError(void 0);
+    setUploads([]);
     void refresh("/");
   }, [refresh]);
   const navigate = (target) => {
     setPath(target);
     setEntries(void 0);
     void refresh(target);
+  };
+  const startUploads = (files) => {
+    for (const file of Array.from(files)) {
+      const id = ++uploadSeq.current;
+      const job = {
+        id,
+        name: file.name,
+        loaded: 0,
+        total: file.size,
+        abort: () => {
+        }
+      };
+      const handle = api.fileUpload(alias, path, file, (loaded, total) => {
+        setUploads((prev) => prev.map((u) => u.id === id ? { ...u, loaded, total } : u));
+      });
+      job.abort = handle.abort;
+      setUploads((prev) => [...prev, job]);
+      handle.promise.then(() => void refresh(path)).catch((uploadError) => {
+        setUploads((prev) => prev.map((u) => u.id === id ? { ...u, error: String(uploadError instanceof Error ? uploadError.message : uploadError) } : u));
+      }).finally(() => {
+        setTimeout(() => setUploads((prev) => prev.filter((u) => u.id !== id)), 4e3);
+      });
+    }
   };
   const onMkdir = async () => {
     const name = window.prompt(tt("files.newdir.prompt"));
@@ -1114,59 +1356,124 @@ function FilesTab({ api, alias }) {
       setError(String(deleteError instanceof Error ? deleteError.message : deleteError));
     }
   };
-  const onDownload = async (entry) => {
+  const onOpen = async (entry) => {
+    if (entry.isDir) return;
+    if (isTextLike(entry)) {
+      setEditing(joinPath(path, entry.name));
+      return;
+    }
     try {
       await api.fileDownload(alias, joinPath(path, entry.name));
     } catch (downloadError) {
       setError(String(downloadError instanceof Error ? downloadError.message : downloadError));
     }
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(import_jsx_runtime4.Fragment, { children: [
-    /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "dshsp-toolbar", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "dshsp-btn", onClick: () => navigate("/"), disabled: busy, children: tt("files.home") }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "dshsp-btn", onClick: () => navigate(parentPath(path)), disabled: busy || path === "/", children: tt("files.up") }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "dshsp-btn", onClick: () => void onMkdir(), disabled: busy, children: tt("files.newdir") }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "dshsp-btn", onClick: () => navigate(path), disabled: busy, children: tt("common.refresh") })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "dshsp-pathbar", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "dshsp-field-label", children: tt("files.path") }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "dshsp-path", children: path })
-    ] }),
-    error && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "dshsp-banner", "data-kind": "error", children: error }),
-    entries === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "dshsp-loading", children: tt("files.loading") }) : entries.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "dshsp-empty", children: tt("files.empty") }) : /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("div", { className: "dshsp-tablewrap", children: /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("table", { className: "dshsp-table", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("tr", { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("th", { children: tt("files.name") }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("th", { children: tt("files.size") }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("th", { children: tt("files.mtime") }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("th", { children: tt("files.actions") })
-      ] }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("tbody", { children: entries.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("tr", { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(
-          "span",
+  return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
+    "div",
+    {
+      className: "dshsp-files-root",
+      onDragOver: (e) => {
+        e.preventDefault();
+        setDragging(true);
+      },
+      onDragLeave: (e) => {
+        if (e.currentTarget === e.target) setDragging(false);
+      },
+      onDrop: (e) => {
+        e.preventDefault();
+        setDragging(false);
+        if (e.dataTransfer.files.length > 0) startUploads(e.dataTransfer.files);
+      },
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshsp-toolbar", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { className: "dshsp-btn", onClick: () => navigate("/"), disabled: busy, children: tt("files.home") }),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { className: "dshsp-btn", onClick: () => navigate(parentPath(path)), disabled: busy || path === "/", children: tt("files.up") }),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { className: "dshsp-btn", onClick: () => void onMkdir(), disabled: busy, children: tt("files.newdir") }),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { className: "dshsp-btn", onClick: () => fileInputRef.current?.click(), disabled: busy, children: tt("files.upload") }),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { className: "dshsp-btn", onClick: () => navigate(path), disabled: busy, children: tt("common.refresh") }),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+            "input",
+            {
+              ref: fileInputRef,
+              type: "file",
+              multiple: true,
+              style: { display: "none" },
+              onChange: (e) => {
+                if (e.target.files && e.target.files.length > 0) startUploads(e.target.files);
+                e.target.value = "";
+              }
+            }
+          )
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshsp-pathbar", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshsp-field-label", children: tt("files.path") }),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshsp-path", children: path }),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshsp-hint", children: tt("files.drop.hint") })
+        ] }),
+        uploads.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshsp-uploads", children: uploads.map((job) => /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshsp-upload", "data-error": job.error ? "" : void 0, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshsp-upload-name dshsp-mono", children: job.name }),
+          job.error ? /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { className: "dshsp-hint", style: { color: "var(--dsw-alias-state-error-primary)" }, children: job.error }) : /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(import_jsx_runtime5.Fragment, { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshsp-meter", style: { flex: 1 }, children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshsp-meter-fill", style: { width: job.total > 0 ? `${job.loaded / job.total * 100}%` : "0%" } }) }),
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("span", { className: "dshsp-hint", children: [
+              formatFileSize(job.loaded),
+              " / ",
+              formatFileSize(job.total)
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { className: "dshsp-iconbtn", onClick: () => job.abort(), children: "\u2715" })
+          ] })
+        ] }, job.id)) }),
+        error && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshsp-banner", "data-kind": "error", children: error }),
+        entries === void 0 ? /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshsp-loading", children: tt("files.loading") }) : entries.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshsp-empty", children: tt("files.empty") }) : /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshsp-tablewrap", children: /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("table", { className: "dshsp-table", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("thead", { children: /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("tr", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("th", { children: tt("files.name") }),
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("th", { children: tt("files.size") }),
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("th", { children: tt("files.mtime") }),
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("th", { children: tt("files.actions") })
+          ] }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("tbody", { children: entries.map((entry) => /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("tr", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)(
+              "span",
+              {
+                className: "dshsp-filename",
+                "data-dir": entry.isDir ? "" : void 0,
+                "data-editable": !entry.isDir && isTextLike(entry) ? "" : void 0,
+                onClick: () => entry.isDir ? navigate(joinPath(path, entry.name)) : void onOpen(entry),
+                children: [
+                  entry.isDir ? "\u{1F4C1} " : isTextLike(entry) ? "\u{1F4DD} " : "\u{1F4C4} ",
+                  entry.name
+                ]
+              }
+            ) }),
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("td", { className: "dshsp-mono dshsp-muted", children: entry.isDir ? "-" : formatFileSize(entry.size) }),
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("td", { className: "dshsp-muted", children: formatMtime(entry.mtime) }),
+            /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshsp-row-actions", children: [
+              !entry.isDir && isTextLike(entry) && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { className: "dshsp-btn", onClick: () => setEditing(joinPath(path, entry.name)), children: tt("files.edit") }),
+              !entry.isDir && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { className: "dshsp-btn", onClick: () => void onOpen(entry), children: tt("common.download") }),
+              /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { className: "dshsp-btn", onClick: () => void onRename(entry), children: tt("common.rename") }),
+              /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { className: "dshsp-btn", "data-danger": "", onClick: () => void onDelete(entry), children: tt("common.delete") })
+            ] }) })
+          ] }, entry.name)) })
+        ] }) }),
+        dragging && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshsp-drop-overlay", children: tt("files.drop.overlay") }),
+        editing && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+          EditorModal,
           {
-            className: "dshsp-filename",
-            "data-dir": entry.isDir ? "" : void 0,
-            onClick: entry.isDir ? () => navigate(joinPath(path, entry.name)) : void 0,
-            children: [
-              entry.isDir ? "\u{1F4C1} " : "\u{1F4C4} ",
-              entry.name
-            ]
+            api,
+            alias,
+            path: editing,
+            onClose: (saved) => {
+              setEditing(void 0);
+              if (saved) void refresh(path);
+            }
           }
-        ) }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("td", { className: "dshsp-mono dshsp-muted", children: entry.isDir ? "-" : formatFileSize(entry.size) }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("td", { className: "dshsp-muted", children: formatMtime(entry.mtime) }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("td", { children: /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "dshsp-row-actions", children: [
-          !entry.isDir && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "dshsp-btn", onClick: () => void onDownload(entry), children: tt("common.download") }),
-          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "dshsp-btn", onClick: () => void onRename(entry), children: tt("common.rename") }),
-          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("button", { className: "dshsp-btn", "data-danger": "", onClick: () => void onDelete(entry), children: tt("common.delete") })
-        ] }) })
-      ] }, entry.name)) })
-    ] }) })
-  ] });
+        )
+      ]
+    }
+  );
 }
 
 // src/client/panel/TerminalTab.tsx
-var import_react5 = require("react");
+var import_react6 = require("react");
 
 // ../../node_modules/.pnpm/@xterm+xterm@6.0.0/node_modules/@xterm/xterm/lib/xterm.mjs
 var zs = Object.defineProperty;
@@ -10596,7 +10903,7 @@ var xterm_default = `/**
 `;
 
 // src/client/panel/TerminalTab.tsx
-var import_jsx_runtime5 = require("react/jsx-runtime");
+var import_jsx_runtime6 = require("react/jsx-runtime");
 var xtermCssInstalled = false;
 function installXtermCss() {
   if (xtermCssInstalled || typeof document === "undefined") return;
@@ -10607,11 +10914,11 @@ function installXtermCss() {
   document.head.appendChild(tag);
 }
 function TerminalTab({ api, alias }) {
-  const containerRef = (0, import_react5.useRef)(null);
-  const [state, setState] = (0, import_react5.useState)("connecting");
-  const [closedReason, setClosedReason] = (0, import_react5.useState)();
-  const [epoch, setEpoch] = (0, import_react5.useState)(0);
-  (0, import_react5.useEffect)(() => {
+  const containerRef = (0, import_react6.useRef)(null);
+  const [state, setState] = (0, import_react6.useState)("connecting");
+  const [closedReason, setClosedReason] = (0, import_react6.useState)();
+  const [epoch, setEpoch] = (0, import_react6.useState)(0);
+  (0, import_react6.useEffect)(() => {
     installXtermCss();
     const container = containerRef.current;
     if (!container) return;
@@ -10670,47 +10977,173 @@ function TerminalTab({ api, alias }) {
       term.dispose();
     };
   }, [api, alias, epoch]);
-  return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshsp-term-wrap", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("div", { className: "dshsp-term", ref: containerRef }),
-    state !== "live" && /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "dshsp-term-overlay", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("span", { children: state === "connecting" ? tt("common.loading") : closedReason ?? tt("term.closed") }),
-      state === "closed" && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("button", { className: "dshsp-btn", "data-primary": "", onClick: () => setEpoch((e) => e + 1), children: tt("term.reconnect") })
+  return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "dshsp-term-wrap", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { className: "dshsp-term", ref: containerRef }),
+    state !== "live" && /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "dshsp-term-overlay", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { children: state === "connecting" ? tt("common.loading") : closedReason ?? tt("term.closed") }),
+      state === "closed" && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { className: "dshsp-btn", "data-primary": "", onClick: () => setEpoch((e) => e + 1), children: tt("term.reconnect") })
     ] })
   ] });
 }
 
+// src/client/panel/Dashboard.tsx
+var import_react7 = require("react");
+var import_jsx_runtime7 = require("react/jsx-runtime");
+var POLL_MS = 8e3;
+var HISTORY = 45;
+function memPercent(status) {
+  if (status.memTotalKb <= 0) return 0;
+  return Math.round((status.memTotalKb - status.memAvailableKb) / status.memTotalKb * 100);
+}
+function cpuPercent(status) {
+  if (status.cpuPercent !== void 0) return status.cpuPercent;
+  if (status.cpuCount > 0) return Math.min(100, Math.round(status.loadAvg[0] / status.cpuCount * 100));
+  return 0;
+}
+function worstDisk(status) {
+  return status.disks.reduce((max, disk) => Math.max(max, disk.usePercent), 0);
+}
+function Sparkline({ points, hot }) {
+  const width = 100;
+  const height = 24;
+  if (points.length < 2) return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("svg", { className: "dshsp-spark", viewBox: `0 0 ${width} ${height}` });
+  const path = points.map((value, index) => {
+    const x = index / (points.length - 1) * width;
+    const y = height - Math.max(0, Math.min(100, value)) / 100 * (height - 2) - 1;
+    return `${index === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("svg", { className: "dshsp-spark", viewBox: `0 0 ${width} ${height}`, "data-hot": hot ? "" : void 0, preserveAspectRatio: "none", children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("path", { d: path, fill: "none", strokeWidth: "1.5" }) });
+}
+function Meter({ percent, label }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshsp-meter-row", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshsp-meter-label", children: label }),
+    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshsp-meter", children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshsp-meter-fill", "data-hot": percent >= 90 ? "" : percent >= 70 ? "warm" : void 0, style: { width: `${Math.min(percent, 100)}%` } }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshsp-meter-value", children: [
+      Math.round(percent),
+      "%"
+    ] })
+  ] });
+}
+function Dashboard({ api, hosts, onOpenHost }) {
+  const [live, setLive] = (0, import_react7.useState)({});
+  const aliasesKey = (0, import_react7.useMemo)(() => hosts.map((h2) => h2.alias).join(","), [hosts]);
+  (0, import_react7.useEffect)(() => {
+    const aliases = aliasesKey === "" ? [] : aliasesKey.split(",");
+    let cancelled = false;
+    const tick = async () => {
+      await Promise.all(aliases.map(async (alias) => {
+        try {
+          const status = await api.status(alias);
+          if (cancelled) return;
+          setLive((prev) => {
+            const entry = prev[alias] ?? { history: [] };
+            const sample = { cpu: cpuPercent(status), mem: memPercent(status) };
+            return {
+              ...prev,
+              [alias]: { status, history: [...entry.history, sample].slice(-HISTORY) }
+            };
+          });
+        } catch (error) {
+          if (cancelled) return;
+          setLive((prev) => ({
+            ...prev,
+            [alias]: { history: prev[alias]?.history ?? [], error: error instanceof Error ? error.message : String(error) }
+          }));
+        }
+      }));
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [api, aliasesKey]);
+  return /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshsp-dash", children: hosts.map((host) => {
+    const entry = live[host.alias];
+    const status = entry?.status;
+    const offline = entry?.error !== void 0;
+    const cpu = status ? cpuPercent(status) : 0;
+    const mem = status ? memPercent(status) : 0;
+    const disk = status ? worstDisk(status) : 0;
+    const hot = cpu >= 90 || mem >= 90 || disk >= 90;
+    return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("button", { className: "dshsp-dashcard", "data-hot": hot && !offline ? "" : void 0, "data-offline": offline ? "" : void 0, onClick: () => onOpenHost(host.alias), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshsp-dashcard-head", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshsp-dot", "data-status": offline ? "fail" : status ? "ok" : "testing" }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshsp-dashcard-name", children: host.label }),
+        host.detectedKind && /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshsp-badge", "data-kind": host.detectedKind, children: tt(host.detectedKind === "dsm" ? "overview.kind.dsm" : "overview.kind.linux") })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshsp-dashcard-addr dshsp-mono", children: [
+        host.username,
+        "@",
+        host.host,
+        ":",
+        host.port
+      ] }),
+      offline ? /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshsp-dashcard-offline", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { children: tt("status.offline") }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshsp-hint", children: entry?.error?.slice(0, 80) })
+      ] }) : status ? /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(import_jsx_runtime7.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshsp-dashcard-gauges", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshsp-gauge", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Meter, { percent: cpu, label: "CPU" }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Sparkline, { points: (entry?.history ?? []).map((s15) => s15.cpu), hot: cpu >= 90 })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshsp-gauge", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Meter, { percent: mem, label: "MEM" }),
+            /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Sparkline, { points: (entry?.history ?? []).map((s15) => s15.mem), hot: mem >= 90 })
+          ] })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshsp-dashcard-meta", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { children: formatUptime(status.uptimeSeconds) }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("span", { className: "dshsp-mono", children: [
+            "load ",
+            status.loadAvg.map((v2) => v2.toFixed(2)).join(" ")
+          ] })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshsp-dashcard-disks", children: status.disks.slice(0, 3).map((disk2) => /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "dshsp-meter-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshsp-meter-label dshsp-mono", children: disk2.mount }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshsp-meter", children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshsp-meter-fill", "data-hot": disk2.usePercent >= 90 ? "" : void 0, style: { width: `${Math.min(disk2.usePercent, 100)}%` } }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { className: "dshsp-meter-value", children: formatBytes(disk2.availKb) })
+        ] }, disk2.mount)) })
+      ] }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "dshsp-loading", children: tt("common.loading") })
+    ] }, host.alias);
+  }) });
+}
+
 // src/client/panel/App.tsx
-var import_jsx_runtime6 = require("react/jsx-runtime");
+var import_jsx_runtime8 = require("react/jsx-runtime");
 function App({ api }) {
-  const [hosts, setHosts] = (0, import_react6.useState)([]);
-  const [loadError, setLoadError] = (0, import_react6.useState)();
-  const [selectedAlias, setSelectedAlias] = (0, import_react6.useState)();
-  const [tab, setTab] = (0, import_react6.useState)("terminal");
-  const [probes, setProbes] = (0, import_react6.useState)({});
-  const [dialog, setDialog] = (0, import_react6.useState)(null);
-  const [notice, setNotice] = (0, import_react6.useState)();
-  const reload = (0, import_react6.useCallback)(async (keepSelection = true) => {
+  const [hosts, setHosts] = (0, import_react8.useState)([]);
+  const [loadError, setLoadError] = (0, import_react8.useState)();
+  const [selectedAlias, setSelectedAlias] = (0, import_react8.useState)();
+  const [tab, setTab] = (0, import_react8.useState)("terminal");
+  const [probes, setProbes] = (0, import_react8.useState)({});
+  const [dialog, setDialog] = (0, import_react8.useState)(null);
+  const [notice, setNotice] = (0, import_react8.useState)();
+  const reload = (0, import_react8.useCallback)(async (keepSelection = true) => {
     try {
       const list = await api.listHosts();
       setHosts(list);
       setLoadError(void 0);
-      setSelectedAlias((prev) => {
-        if (keepSelection && prev && list.some((h2) => h2.alias === prev)) return prev;
-        return list[0]?.alias;
-      });
+      setSelectedAlias((prev) => keepSelection && prev && list.some((h2) => h2.alias === prev) ? prev : void 0);
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : String(error));
     }
   }, [api]);
-  (0, import_react6.useEffect)(() => {
+  (0, import_react8.useEffect)(() => {
     void reload();
   }, [reload]);
-  const probe = (0, import_react6.useCallback)(async (alias) => {
+  const probe = (0, import_react8.useCallback)(async (alias) => {
     setProbes((prev) => ({ ...prev, [alias]: "testing" }));
     const result = await api.testSaved(alias).catch(() => void 0);
     setProbes((prev) => ({ ...prev, [alias]: result?.ok ? "ok" : "fail" }));
   }, [api]);
   const selected = hosts.find((h2) => h2.alias === selectedAlias);
+  const openHost = (alias) => {
+    setSelectedAlias(alias);
+    setTab("terminal");
+  };
   const onDelete = async (host) => {
     if (!window.confirm(tt("hosts.delete.confirm", { label: host.label }))) return;
     try {
@@ -10727,49 +11160,52 @@ function App({ api }) {
     setDialog(null);
     await reload();
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "dshsp-view", "data-dsh-server-panel-view": "", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "dshsp-header", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("h2", { className: "dshsp-title", children: tt("panel.title") }),
-      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { className: "dshsp-btn", "data-primary": "", onClick: () => setDialog({ mode: "add" }), children: tt("hosts.add") }),
-      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { className: "dshsp-btn", onClick: () => void reload(), children: tt("common.refresh") })
+  return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshsp-view", "data-dsh-server-panel-view": "", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshsp-header", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("h2", { className: "dshsp-title", children: selected ? /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("button", { className: "dshsp-backbtn", onClick: () => setSelectedAlias(void 0), title: tt("dash.back"), children: [
+        "\u2190 ",
+        tt("dash.title")
+      ] }) : tt("panel.title") }),
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { className: "dshsp-btn", "data-primary": "", onClick: () => setDialog({ mode: "add" }), children: tt("hosts.add") }),
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { className: "dshsp-btn", onClick: () => void reload(), children: tt("common.refresh") })
     ] }),
-    notice && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: { padding: "0 16px" }, children: /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { className: "dshsp-banner", "data-kind": notice.kind, children: notice.text }) }),
-    loadError && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: { padding: "0 16px" }, children: /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { className: "dshsp-banner", "data-kind": "error", children: tt("common.error", { error: loadError }) }) }),
-    /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "dshsp-body", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "dshsp-hosts", children: [
-        hosts.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { className: "dshsp-empty", children: tt("hosts.empty") }),
-        hosts.map((host) => /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)(
+    notice && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { style: { padding: "0 16px" }, children: /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "dshsp-banner", "data-kind": notice.kind, children: notice.text }) }),
+    loadError && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { style: { padding: "0 16px" }, children: /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "dshsp-banner", "data-kind": "error", children: tt("common.error", { error: loadError }) }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshsp-body", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshsp-hosts", children: [
+        hosts.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "dshsp-empty", children: tt("hosts.empty") }),
+        hosts.map((host) => /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
           "button",
           {
             className: "dshsp-hostcard",
             "data-active": host.alias === selectedAlias ? "" : void 0,
-            onClick: () => setSelectedAlias(host.alias),
+            onClick: () => openHost(host.alias),
             children: [
-              /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("span", { className: "dshsp-hostcard-top", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "dshsp-dot", "data-status": probes[host.alias] ?? "unknown" }),
-                /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "dshsp-hostname", children: host.label }),
-                host.detectedKind === "dsm" && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "dshsp-badge", "data-kind": "dsm", children: "DSM" })
+              /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("span", { className: "dshsp-hostcard-top", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshsp-dot", "data-status": probes[host.alias] ?? "unknown" }),
+                /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshsp-hostname", children: host.label }),
+                host.detectedKind === "dsm" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshsp-badge", "data-kind": "dsm", children: "DSM" })
               ] }),
-              /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("span", { className: "dshsp-hostaddr", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("span", { className: "dshsp-hostaddr", children: [
                 host.username,
                 "@",
                 host.host,
                 ":",
                 host.port
               ] }),
-              /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("span", { className: "dshsp-hostmeta", children: [
-                host.group && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "dshsp-badge", children: host.group }),
-                /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "dshsp-hint", children: probes[host.alias] === "testing" ? tt("status.testing") : probes[host.alias] === "ok" ? "\u25CF online" : probes[host.alias] === "fail" ? tt("status.offline") : tt("status.unknown") }),
-                /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { style: { flex: 1 } }),
-                /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "dshsp-iconbtn", title: tt("hosts.test"), onClick: (e) => {
+              /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("span", { className: "dshsp-hostmeta", children: [
+                host.group && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshsp-badge", children: host.group }),
+                /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshsp-hint", children: probes[host.alias] === "testing" ? tt("status.testing") : probes[host.alias] === "ok" ? "\u25CF online" : probes[host.alias] === "fail" ? tt("status.offline") : tt("status.unknown") }),
+                /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { style: { flex: 1 } }),
+                /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshsp-iconbtn", title: tt("hosts.test"), onClick: (e) => {
                   e.stopPropagation();
                   void probe(host.alias);
                 }, children: "\u27F3" }),
-                /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "dshsp-iconbtn", title: tt("hosts.edit"), onClick: (e) => {
+                /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshsp-iconbtn", title: tt("hosts.edit"), onClick: (e) => {
                   e.stopPropagation();
                   setDialog({ mode: "edit", host });
                 }, children: "\u270E" }),
-                /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "dshsp-iconbtn", title: tt("hosts.delete"), onClick: (e) => {
+                /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshsp-iconbtn", title: tt("hosts.delete"), onClick: (e) => {
                   e.stopPropagation();
                   void onDelete(host);
                 }, children: "\u{1F5D1}" })
@@ -10779,18 +11215,18 @@ function App({ api }) {
           host.alias
         ))
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { className: "dshsp-detail", children: selected ? /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)(import_jsx_runtime6.Fragment, { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(DetailHeader, { api, host: selected, onChanged: () => void reload() }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { className: "dshsp-tabs", children: ["terminal", "docker", "overview", "files"].map((name) => /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { className: "dshsp-tab", "data-active": tab === name ? "" : void 0, onClick: () => setTab(name), children: tt(name === "terminal" ? "tab.terminal" : name === "docker" ? "tab.docker" : name === "overview" ? "tab.overview" : "tab.files") }, name)) }),
-        /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: tab === "terminal" ? "dshsp-tabbody dshsp-tabbody-flush" : "dshsp-tabbody", children: [
-          tab === "terminal" && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(TerminalTab, { api, alias: selected.alias }, selected.alias),
-          tab === "overview" && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(OverviewTab, { api, alias: selected.alias }),
-          tab === "docker" && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(DockerTab, { api, alias: selected.alias }),
-          tab === "files" && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(FilesTab, { api, alias: selected.alias })
+      /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "dshsp-detail", children: selected ? /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(import_jsx_runtime8.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(DetailHeader, { api, host: selected, onChanged: () => void reload() }),
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "dshsp-tabs", children: ["terminal", "docker", "overview", "files"].map((name) => /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { className: "dshsp-tab", "data-active": tab === name ? "" : void 0, onClick: () => setTab(name), children: tt(name === "terminal" ? "tab.terminal" : name === "docker" ? "tab.docker" : name === "overview" ? "tab.overview" : "tab.files") }, name)) }),
+        /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: tab === "terminal" ? "dshsp-tabbody dshsp-tabbody-flush" : "dshsp-tabbody", children: [
+          tab === "terminal" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(TerminalTab, { api, alias: selected.alias }, selected.alias),
+          tab === "overview" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(OverviewTab, { api, alias: selected.alias }),
+          tab === "docker" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(DockerTab, { api, alias: selected.alias }),
+          tab === "files" && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(FilesTab, { api, alias: selected.alias })
         ] })
-      ] }) : /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { className: "dshsp-empty", children: tt("hosts.empty") }) })
+      ] }) : hosts.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(Dashboard, { api, hosts, onOpenHost: openHost }) : /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("div", { className: "dshsp-empty", children: tt("hosts.empty") }) })
     ] }),
-    dialog && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+    dialog && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
       HostForm,
       {
         mode: dialog.mode,
@@ -10803,8 +11239,8 @@ function App({ api }) {
   ] });
 }
 function DetailHeader({ api, host, onChanged }) {
-  const [message, setMessage] = (0, import_react6.useState)();
-  const [busy, setBusy] = (0, import_react6.useState)(false);
+  const [message, setMessage] = (0, import_react8.useState)();
+  const [busy, setBusy] = (0, import_react8.useState)(false);
   const run = async (action) => {
     if (action === "reboot" && !window.confirm(tt("power.reboot.confirm", { label: host.label }))) return;
     if (action === "shutdown" && !window.confirm(tt("power.shutdown.confirm", { label: host.label }))) return;
@@ -10841,18 +11277,18 @@ function DetailHeader({ api, host, onChanged }) {
       setMessage({ kind: "error", text: tt("portal.failed", { error: error instanceof Error ? error.message : String(error) }) });
     }
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("div", { className: "dshsp-detail-head", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "dshsp-detail-title", children: host.label }),
-    /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)("span", { className: "dshsp-detail-sub", children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("div", { className: "dshsp-detail-head", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshsp-detail-title", children: host.label }),
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)("span", { className: "dshsp-detail-sub", children: [
       host.username,
       "@",
       host.host,
       ":",
       host.port
     ] }),
-    host.detectedKind && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "dshsp-badge", "data-kind": host.detectedKind, children: tt(host.detectedKind === "dsm" ? "overview.kind.dsm" : "overview.kind.linux") }),
-    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "dshsp-spacer" }),
-    (host.portals ?? []).map((portal, index) => /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)(
+    host.detectedKind && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshsp-badge", "data-kind": host.detectedKind, children: tt(host.detectedKind === "dsm" ? "overview.kind.dsm" : "overview.kind.linux") }),
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshsp-spacer" }),
+    (host.portals ?? []).map((portal, index) => /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(
       "button",
       {
         className: "dshsp-btn",
@@ -10866,19 +11302,19 @@ function DetailHeader({ api, host, onChanged }) {
       },
       `${portal.name}-${index}`
     )),
-    host.wolMac && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { className: "dshsp-btn", disabled: busy, onClick: () => void run("wol"), children: tt("power.wol") }),
-    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { className: "dshsp-btn", disabled: busy, onClick: () => void run("reboot"), children: tt("power.reboot") }),
-    /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("button", { className: "dshsp-btn", "data-danger": "", disabled: busy, onClick: () => void run("shutdown"), children: tt("power.shutdown") }),
-    message && /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("span", { className: "dshsp-hint", style: { color: message.kind === "error" ? "var(--dsw-alias-state-error-primary)" : "var(--dsw-alias-state-success-primary)" }, children: message.text })
+    host.wolMac && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { className: "dshsp-btn", disabled: busy, onClick: () => void run("wol"), children: tt("power.wol") }),
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { className: "dshsp-btn", disabled: busy, onClick: () => void run("reboot"), children: tt("power.reboot") }),
+    /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("button", { className: "dshsp-btn", "data-danger": "", disabled: busy, onClick: () => void run("shutdown"), children: tt("power.shutdown") }),
+    message && /* @__PURE__ */ (0, import_jsx_runtime8.jsx)("span", { className: "dshsp-hint", style: { color: message.kind === "error" ? "var(--dsw-alias-state-error-primary)" : "var(--dsw-alias-state-success-primary)" }, children: message.text })
   ] });
 }
 
 // src/client/register.tsx
-var import_jsx_runtime7 = require("react/jsx-runtime");
+var import_jsx_runtime9 = require("react/jsx-runtime");
 var SERVER_PANEL_ID = "server-panel";
 var PANEL_ORDER = 50;
 function ServerPanelIcon({ size }) {
-  return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)(
     "svg",
     {
       "data-dsh-panel-entry": SERVER_PANEL_ID,
@@ -10892,11 +11328,11 @@ function ServerPanelIcon({ size }) {
       strokeLinejoin: "round",
       "aria-hidden": "true",
       children: [
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("rect", { x: "2", y: "1.75", width: "12", height: "5.5", rx: "1.25" }),
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("rect", { x: "2", y: "8.75", width: "12", height: "5.5", rx: "1.25" }),
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("circle", { cx: "4.25", cy: "4.5", r: "0.6", fill: "currentColor" }),
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("circle", { cx: "4.25", cy: "11.5", r: "0.6", fill: "currentColor" }),
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("path", { d: "M7 4.5h4.75M7 11.5h3" })
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("rect", { x: "2", y: "1.75", width: "12", height: "5.5", rx: "1.25" }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("rect", { x: "2", y: "8.75", width: "12", height: "5.5", rx: "1.25" }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("circle", { cx: "4.25", cy: "4.5", r: "0.6", fill: "currentColor" }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("circle", { cx: "4.25", cy: "11.5", r: "0.6", fill: "currentColor" }),
+        /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("path", { d: "M7 4.5h4.75M7 11.5h3" })
       ]
     }
   );

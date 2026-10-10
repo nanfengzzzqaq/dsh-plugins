@@ -32,6 +32,11 @@ function requiredParam(url: URL, name: string): string {
   return value
 }
 
+/** Upload byte cap (raw streamed body). */
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+/** Editor read/write byte cap. */
+const MAX_EDIT_BYTES = 1024 * 1024
+
 export function makeRoutes(deps: ServerPanelRoutesDeps): { routes: WebRoute[]; upgrades: WebUpgradeRoute[] } {
   const { store, engine } = deps
 
@@ -304,6 +309,60 @@ export function makeRoutes(deps: ServerPanelRoutesDeps): { routes: WebRoute[]; u
         if (body === null) { writeJson(res, 400, { error: 'invalid JSON body' }); return }
         try {
           await engine.fileDelete(String(body.alias), String(body.path), body.isDir === true, body.recursive === true)
+          writeJson(res, 200, { ok: true })
+        } catch (error) {
+          writeJson(res, 502, { error: errorMessage(error) })
+        }
+      },
+    },
+    {
+      // Raw body streamed straight into the SFTP write stream.
+      kind: 'exact',
+      path: API.filesUpload,
+      handler: async (req, res) => {
+        if (!fence(req, res)) return
+        if (req.method !== 'POST') { writeJson(res, 405, { error: 'method not allowed' }); return }
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        try {
+          const alias = requiredParam(url, 'alias')
+          const remotePath = requiredParam(url, 'path')
+          if (remotePath.endsWith('/')) throw new Error('path must name a file, not a directory')
+          const declared = Number(req.headers['content-length'] ?? 0)
+          if (declared > MAX_UPLOAD_BYTES) throw new Error('file too large')
+          await engine.fileUploadStream(alias, remotePath, req)
+          writeJson(res, 200, { ok: true })
+        } catch (error) {
+          writeJson(res, 502, { error: errorMessage(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: API.filesRead,
+      handler: async (req, res) => {
+        if (!fence(req, res)) return
+        if (req.method !== 'GET') { writeJson(res, 405, { error: 'method not allowed' }); return }
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        try {
+          const result = await engine.fileRead(requiredParam(url, 'alias'), requiredParam(url, 'path'), MAX_EDIT_BYTES)
+          writeJson(res, 200, result)
+        } catch (error) {
+          writeJson(res, 502, { error: errorMessage(error) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: API.filesWrite,
+      handler: async (req, res) => {
+        if (!fence(req, res)) return
+        if (req.method !== 'POST') { writeJson(res, 405, { error: 'method not allowed' }); return }
+        const body = await readJsonBody(req)
+        if (body === null) { writeJson(res, 400, { error: 'invalid JSON body' }); return }
+        try {
+          const content = body.content
+          if (typeof content !== 'string' || Buffer.byteLength(content) > MAX_EDIT_BYTES) throw new Error('content too large')
+          await engine.fileWrite(String(body.alias), String(body.path), content)
           writeJson(res, 200, { ok: true })
         } catch (error) {
           writeJson(res, 502, { error: errorMessage(error) })

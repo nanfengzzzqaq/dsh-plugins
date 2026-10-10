@@ -2,8 +2,8 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-/** Cap on JSON request bodies (host payloads are a few KB). */
-const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
+/** Cap on JSON request bodies (editor writes carry up to ~1 MB of text). */
+const MAX_JSON_BODY_BYTES = 8 * 1024 * 1024
 
 /** Read a JSON request body; null on parse failure or overflow. */
 export function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown> | null> {

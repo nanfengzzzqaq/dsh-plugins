@@ -1,6 +1,6 @@
 {
   "name": "dsh-server-panel",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "DSH 鏈嶅姟鍣?/ NAS 鍙鍖栫鐞嗛潰鏉匡細涓绘満鐘舵€併€丏ocker 瀹瑰櫒绠＄悊銆佽繙绋嬫枃浠舵祻瑙堛€侀噸鍚?鍏虫満/WOL 鐢垫簮鎿嶄綔",
   "type": "module",
   "main": "lib/index.js",

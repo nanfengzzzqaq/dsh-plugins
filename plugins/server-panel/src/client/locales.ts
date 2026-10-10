@@ -124,6 +124,17 @@ export const zh = {
   'portal.tunnel.opening': '正在建立隧道…',
   'portal.failed': '打开失败：{error}',
   'term.unavailable': '当前页面无法建立 WebSocket 连接（请通过浏览器访问 Web GUI 使用此功能）',
+  'dash.title': '总览',
+  'dash.back': '返回总览',
+  'files.upload': '上传',
+  'files.edit': '编辑',
+  'files.drop.hint': '可拖拽文件到此上传',
+  'files.drop.overlay': '松开以上传到当前目录',
+  'editor.save': '保存',
+  'editor.saving': '保存中…',
+  'editor.dirty': '● 未保存',
+  'editor.unsaved': '有未保存的修改，确定关闭吗？',
+  'editor.truncated': '文件超过 1MB，仅显示前 1MB（只读）',
 }
 
 export type ServerPanelKey = keyof typeof zh
@@ -250,4 +261,15 @@ export const en: Record<ServerPanelKey, string> = {
   'portal.tunnel.opening': 'Opening tunnel…',
   'portal.failed': 'Open failed: {error}',
   'term.unavailable': 'This page cannot open a WebSocket (use the Web GUI in a browser for this feature)',
+  'dash.title': 'Dashboard',
+  'dash.back': 'Back to dashboard',
+  'files.upload': 'Upload',
+  'files.edit': 'Edit',
+  'files.drop.hint': 'drop files here to upload',
+  'files.drop.overlay': 'Release to upload to this directory',
+  'editor.save': 'Save',
+  'editor.saving': 'Saving…',
+  'editor.dirty': '● unsaved',
+  'editor.unsaved': 'Close with unsaved changes?',
+  'editor.truncated': 'File exceeds 1 MB; showing the first 1 MB (read-only)',
 }
